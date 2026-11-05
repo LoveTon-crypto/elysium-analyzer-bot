@@ -141,6 +141,7 @@ class DeployFeed:
             except RpcError:
                 pass  # node without that state: carry on, the pool check below still filters
         dev, to = (tx.get("from") or "").lower(), (tx.get("to") or "").lower()
+        await self._seed_v4_key(token, txh)
         try:
             tok = await self.dex.token(token)
         except (NoPool, RpcError):
@@ -190,6 +191,34 @@ class DeployFeed:
                                             link_preview_options=NO_PREVIEW)
             except Exception as ex:
                 log.info("refresh %s: %s", token, ex)
+
+    async def _seed_v4_key(self, token: str, txh: str):
+        """Launchpads that create a Uniswap v4 pool in the launch tx (Ascend, RONS v4 …): the pool's Initialize
+        event is right in the receipt — hand its PoolKey to dex.py so the new token is priced at once."""
+        try:
+            from dex import _keccak
+            from eth_utils import keccak
+            topic = "0x" + keccak(text="Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)").hex().removeprefix("0x")
+            rc = await self.rpc.req("eth_getTransactionReceipt", [txh])
+            hypes = self.dex._hype_addrs()
+            for lg in (rc or {}).get("logs") or []:
+                t = lg.get("topics") or []
+                if len(t) < 4 or t[0] != topic:
+                    continue
+                c0, c1 = "0x" + t[2][-40:].lower(), "0x" + t[3][-40:].lower()
+                if token not in (c0, c1):
+                    continue
+                other = c1 if c0 == token else c0
+                if other not in hypes:
+                    continue
+                d = lg["data"][2:]
+                key = t[2][2:].rjust(64, "0") + t[3][2:].rjust(64, "0") + d[0:64] + d[64:128] + d[128:192]
+                if _keccak(key) == t[1]:
+                    self.dex._v4keys[token] = (time.monotonic(), (key, other))
+                    log.info("v4 pool from launch tx %s: hook 0x%s", token, key[-40:])
+                    return
+        except Exception as ex:
+            log.debug("seed v4 %s: %s", token, ex)
 
     # ---------- post ----------
     async def _token_meta(self, token: str, tx: dict | None, name: str, symbol: str) -> tuple[dict, bytes | None]:
