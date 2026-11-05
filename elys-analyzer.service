@@ -1,0 +1,13 @@
+[Unit]
+Description=Elysium Analyzer Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/elysium-analyzer-bot
+ExecStart=/root/elysium-analyzer-bot/venv/bin/python /root/elysium-analyzer-bot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
