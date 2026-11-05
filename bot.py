@@ -514,14 +514,30 @@ async def cmd_settopic(update: Update, ctx):
     msg = update.effective_message
     if not is_owner(update):
         return
+    keys = [k.lower() for k in ctx.args[:1]]
+    if keys == ["mc"]:                                   # all market-cap levels at once
+        keys = [level_key(v) for v in C.MCAP_LEVELS]
+    if not keys or any(k not in TOPICS for k in keys):
+        return await msg.reply_html("Usage: <code>/settopic dip</code> inside a group topic, or "
+                                    "<code>/settopic 10k @channel</code> (<code>mc</code> = all MC levels)\n"
+                                    "Keys: " + ", ".join(TOPICS))
+    if len(ctx.args) > 1:                                # a channel: the owner can't send commands inside it
+        try:
+            chat = await ctx.bot.get_chat(ctx.args[1].strip())
+            m = await ctx.bot.send_message(chat.id, "✅ Alerts connected.")
+            await m.delete()
+        except Exception as ex:
+            return await msg.reply_html(f"❌ Can't post there: {e(ex)}\nAdd me to the channel as admin first.")
+        for k in keys:
+            store.set_topic(k, chat.id, None)
+        return await msg.reply_html(f"✅ <b>{', '.join(keys)}</b> → <b>{e(chat.title or ctx.args[1])}</b>.")
     if update.effective_chat.type == ChatType.PRIVATE:
-        return await msg.reply_text("Use this inside a topic of your group.")
-    key = ctx.args[0].lower() if ctx.args else ""
-    if key not in TOPICS:
-        return await msg.reply_html("Usage: <code>/settopic dip</code>\nKeys: " + ", ".join(TOPICS))
+        return await msg.reply_html("Use this inside a topic of your group, or add the channel: "
+                                    "<code>/settopic 10k @channel</code>")
     thread = msg.message_thread_id if msg.is_topic_message else None
-    store.set_topic(key, update.effective_chat.id, thread)
-    await msg.reply_html(f"✅ <b>{e(TOPICS[key])}</b> → {'this topic' if thread else 'this chat'}.")
+    for k in keys:
+        store.set_topic(k, update.effective_chat.id, thread)
+    await msg.reply_html(f"✅ <b>{', '.join(keys)}</b> → {'this topic' if thread else 'this chat'}.")
 
 
 async def cmd_unsettopic(update: Update, ctx):
@@ -554,7 +570,7 @@ async def cmd_setdeploys(update: Update, ctx):
                                     "<code>/setdeploys off</code> — stop posting")
     v = ctx.args[0].strip()
     if v.lower() == "off":
-        store.kv_set("deploy_channel", None)
+        store.kv_set("deploy_channel", "off")
         return await msg.reply_text("Deploys channel turned off.")
     try:
         chat = await ctx.bot.get_chat(v)

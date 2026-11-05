@@ -74,7 +74,7 @@ class DeployFeed:
     # ---------- settings ----------
     def channel(self):
         v = self.store.kv_get("deploy_channel") or C.DEPLOY_CHANNEL
-        if not v:
+        if not v or v == "off":          # /setdeploys off (the .env default used to switch it right back on)
             return None
         return int(v) if v.lstrip("-").isdigit() else v
 
