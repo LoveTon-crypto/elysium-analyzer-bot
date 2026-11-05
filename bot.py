@@ -41,10 +41,19 @@ TOPICS["daily"] = f"Daily top-5 gainers / top-3 losers (24h), posted at {C.env('
 TOPICS["bigbuy"] = f"Big buys of {MIN_HYPE:g}+ HYPE (BIGBUY_HYPE in .env)"
 
 store = Store(C.DB_PATH)
+# Two connections to the nodes: commands people send (scan, tops, PnL) never wait behind background work —
+# the deploys feed, tracker, big buys and volume run on their own client capped at BG_RPC_INFLIGHT requests.
 rpc = Rpc(C.RPC_URLS)
-dex = Dex(rpc, parse_routers(C.ROUTERS or DEFAULT_VENUES))
+rpc_bg = Rpc(C.RPC_URLS, max_inflight=int(C.env("BG_RPC_INFLIGHT", "6")))
+VENUES = parse_routers(C.ROUTERS or DEFAULT_VENUES)
+dex = Dex(rpc, VENUES)
 market = Market(rpc, dex)
-feed = DeployFeed(store, rpc, dex, market)
+dex_bg = Dex(rpc_bg, parse_routers(C.ROUTERS or DEFAULT_VENUES))
+market_bg = Market(rpc_bg, dex_bg)
+# what either side learns (a token's venue, its v4 pool, names) is shared, so the other doesn't search again
+for _attr in ("_venue_cache", "_v4keys", "_v4jobs", "_meta", "_supply"):
+    setattr(dex_bg, _attr, getattr(dex, _attr))
+feed = DeployFeed(store, rpc_bg, dex_bg, market_bg)
 ext = ExtData(store, feed.http)
 holders = HolderScanner(rpc, store, feed.http)
 swaps = SwapHistory(rpc)
@@ -68,9 +77,9 @@ async def post(topic_key: str, text: str, image=None, kb=None):
         return None
 
 
-tracker = Tracker(store, market, post, ext)
-big = BigBuys(store, rpc, dex, market, post)
-book = tops.VolumeBook(store, rpc, big.whype)
+tracker = Tracker(store, market_bg, post, ext)
+big = BigBuys(store, rpc_bg, dex_bg, market_bg, post)
+book = tops.VolumeBook(store, rpc_bg, big.whype)
 big.book = book
 
 
@@ -626,8 +635,9 @@ async def on_startup(app: Application):
             log.error("RPC chain id %s ≠ CHAIN_ID %s", cid, C.CHAIN_ID)
     except Exception as ex:
         log.error("RPC unavailable at start: %s", ex)
-    await dex.init()
+    await asyncio.gather(dex.init(), dex_bg.init())
     rpc.start_health()
+    rpc_bg.start_health()
     app.create_task(feed.follow(app))
     app.create_task(tracker.run(app))
     app.create_task(big.run(app))

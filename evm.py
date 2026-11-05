@@ -125,8 +125,10 @@ def short(addr: str) -> str:
 
 # ---------------------------------------------------------------- RPC
 class Rpc:
-    def __init__(self, urls: list[str], timeout: float = 6):
+    def __init__(self, urls: list[str], timeout: float = 6, max_inflight: int = 0):
+        """max_inflight > 0 caps how many requests this client keeps open at once (background work)."""
         self.urls = urls
+        self._sem = asyncio.Semaphore(max_inflight) if max_inflight else None
         self._i = 0
         self._ids = itertools.count(1)
         self.http = httpx.AsyncClient(timeout=timeout, headers={"user-agent": "elysium-trade-bot"})
@@ -166,6 +168,12 @@ class Rpc:
             self._i = i
 
     async def req(self, method: str, params: list | None = None):
+        if self._sem is None:
+            return await self._req(method, params)
+        async with self._sem:
+            return await self._req(method, params)
+
+    async def _req(self, method: str, params: list | None = None):
         last = None
         for k in range(len(self.urls) * 2):
             url = self.urls[(self._i + k) % len(self.urls)]
