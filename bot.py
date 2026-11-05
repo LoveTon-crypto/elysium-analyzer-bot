@@ -639,6 +639,7 @@ async def on_startup(app: Application):
     rpc.start_health()
     rpc_bg.start_health()
     app.create_task(feed.follow(app))
+    app.create_task(feed.recheck(app))
     app.create_task(tracker.run(app))
     app.create_task(big.run(app))
     if C.BACKFILL_BLOCKS:

@@ -30,6 +30,12 @@ from evm import RpcError, encode
 from links import e, tree, usd
 
 log = logging.getLogger("deploys")
+# launch contracts (tx target) of pads, from their docs / app configs
+BUILTIN_FACTORIES = {
+    "0x38d3ef3a06d18fa3286fb5deafe611be725fcd15": "MONTRA",    # Montra factory (montramarkets.xyz/docs/contracts)
+    "0x00d4c904f74f74c6920c95e3ee807ab3c52dd205": "BOXA",      # Boxa launcher
+}
+RECHECK_MIN = 20       # tokens without a pool yet are re-checked for this long, then given up
 
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ZERO_TOPIC = "0x" + "0" * 64
@@ -156,6 +162,8 @@ class DeployFeed:
             if snap or time.monotonic() - t0 >= wait:
                 break
             await asyncio.sleep(3)
+        if snap and snap.pad:
+            self.learn_factory(to, snap.pad)
         pad = (snap.pad if snap else None) or C.PAD_FACTORIES.get(to) or self.known_launchers().get(to)
         ok = bool(pad) or C.POST_ALL
         if not pad:
@@ -197,15 +205,24 @@ class DeployFeed:
         to one of them is a memepad deploy even if its pool doesn't answer a quote yet."""
         if getattr(self, "_launchers", None) is None:
             out = {}
-            for v in self.dex.venues:
+            for v in getattr(self.dex, "venues", []):
                 label = links.pad_of(v)
                 if not label:
                     continue
                 for a in (v.launcher, v.router, v.hook):
                     if a and a.startswith("0x") and a.lower() not in ("0x1b341fdd55d56f8e08409a2c25ddfad93eb03c1a",):
                         out.setdefault(a.lower(), label)       # (the shared Uniswap Universal Router isn't a pad)
+            out.update(BUILTIN_FACTORIES)
             self._launchers = out
-        return self._launchers
+        learned = {r[0][3:]: r[1] for r in self.store.q("SELECT k, v FROM kv WHERE k LIKE 'pf:%'")}
+        return {**self._launchers, **learned}
+
+    def learn_factory(self, to: str, pad: str):
+        """A launch contract whose token turned out to trade on a known pad is remembered as that pad's factory,
+        so its next launches are labelled at once (no waiting for the pool)."""
+        if to and pad and pad not in ("UNIV4",) and to not in self.known_launchers():
+            self.store.kv_set("pf:" + to, pad)
+            log.info("learned launch contract %s = %s", to, pad)
 
     async def _seed_v4_key(self, token: str, txh: str):
         """Launchpads that create a Uniswap v4 pool in the launch tx (Ascend, RONS v4 …): the pool's Initialize
@@ -235,6 +252,39 @@ class DeployFeed:
                     return
         except Exception as ex:
             log.debug("seed v4 %s: %s", token, ex)
+
+    async def recheck(self, app):
+        """Every minute: tokens launched in the last RECHECK_MIN minutes that had no pool when first seen get
+        another try; once a memepad pool answers they're posted (late, but not lost)."""
+        await asyncio.sleep(30)
+        while True:
+            try:
+                since = time.time() - RECHECK_MIN * 60
+                rows = self.store.q("SELECT token, factory, tx FROM deploys WHERE posted=-1 AND ts>? ORDER BY ts DESC "
+                                    "LIMIT 40", (since,))
+                for token, factory, txh in rows:
+                    snap = await self.market.try_snap(token, retries=0)
+                    pad = (snap.pad if snap else None) or self.known_launchers().get(factory or "")
+                    if not pad:
+                        continue
+                    if snap and snap.pad:
+                        self.learn_factory(factory or "", snap.pad)
+                    self.store.q("UPDATE deploys SET pad=?, posted=0, venue=? WHERE token=?",
+                                 (pad, snap.route.venue.name if snap else "", token))
+                    self.unknown[factory or "?"] = max(0, self.unknown.get(factory or "?", 1) - 1)
+                    chat = self.channel()
+                    if chat:
+                        tx = await self.rpc.req("eth_getTransactionByHash", [txh]) if txh else None
+                        text, img, kb = await self.build(token, app.bot.username, tx=tx, snap=snap)
+                        msg = await self.send(app.bot, chat, text, img, kb)
+                        self.store.q("UPDATE deploys SET posted=1, chat_id=?, msg_id=? WHERE token=?",
+                                     (str(chat), msg.message_id if msg else 0, token))
+                        self.stats["posted"] += 1
+                        self.stats["last_post"] = time.time()
+                        log.info("late post %s deploy %s", pad, token)
+            except Exception as ex:
+                log.warning("recheck: %s", ex)
+            await asyncio.sleep(60)
 
     # ---------- post ----------
     async def _token_meta(self, token: str, tx: dict | None, name: str, symbol: str) -> tuple[dict, bytes | None]:
