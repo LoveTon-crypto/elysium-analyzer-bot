@@ -26,6 +26,20 @@ class RpcError(RuntimeError):
     pass
 
 
+import os as _os
+# eth_getLogs pacing per node, shared by every Rpc client in the process (the nodes limit log searches per IP)
+LOGS_PER_MIN = float(_os.getenv("LOGS_PER_MIN_PER_NODE", "40"))
+_LOG_NEXT: dict[str, float] = {}       # url → earliest monotonic time for its next log search
+_LOG_COOL: dict[str, float] = {}       # url → rate-limited until
+_HEIGHTS: dict[str, int] = {}          # url → last seen head (from the health check)
+_LOG_LOCK = None
+
+
+def _rate_limited(msg: str) -> bool:
+    m = msg.lower()
+    return "too many" in m or "rate limit" in m or "rate-limit" in m or "429" in m
+
+
 class TxFailed(RuntimeError):
     def __init__(self, msg: str, tx: str | None = None):
         super().__init__(msg)
@@ -157,6 +171,9 @@ class Rpc:
             except Exception:
                 return u, -1, 99.0
         res = await asyncio.gather(*(probe(u) for u in self.urls))
+        for u, h, _ in res:
+            if h > 0:
+                _HEIGHTS[u] = h
         top = max(h for _, h, _ in res)
         if top < 0:
             return
@@ -173,7 +190,47 @@ class Rpc:
         async with self._sem:
             return await self._req(method, params)
 
+    async def _logs(self, params: list):
+        """eth_getLogs spread over all nodes: the one free soonest under its per-minute pace that has already
+        seen the requested blocks; a node answering 'too many' cools down for a minute, the next one is used."""
+        global _LOG_LOCK
+        if _LOG_LOCK is None:
+            _LOG_LOCK = asyncio.Lock()
+        flt = (params or [{}])[0]
+        try:
+            to = int(flt.get("toBlock", "0x0"), 16) if str(flt.get("toBlock", "")).startswith("0x") else 0
+        except ValueError:
+            to = 0
+        gap = 60.0 / max(LOGS_PER_MIN, 1)
+        last = None
+        for _ in range(len(self.urls) * 2):
+            async with _LOG_LOCK:
+                now = time.monotonic()
+                ok = [u for u in self.urls if _LOG_COOL.get(u, 0) <= now and (not to or _HEIGHTS.get(u, to) >= to)]
+                if not ok:
+                    ok = [u for u in self.urls if _LOG_COOL.get(u, 0) <= now] or list(self.urls)
+                url = min(ok, key=lambda u: _LOG_NEXT.get(u, 0))
+                wait = _LOG_NEXT.get(url, 0) - now
+                _LOG_NEXT[url] = max(now, _LOG_NEXT.get(url, 0)) + gap
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                return await self._one(url, "eth_getLogs", params)
+            except RpcError as ex:
+                if _rate_limited(str(ex)):
+                    _LOG_COOL[url] = time.monotonic() + 60
+                    log.info("rpc %s: log searches rate-limited, pausing it for 60 s", url)
+                    last = ex
+                    continue
+                raise
+            except Exception as ex:
+                _LOG_COOL[url] = time.monotonic() + 10
+                last = ex
+        raise RpcError(f"getLogs: all nodes busy ({last})")
+
     async def _req(self, method: str, params: list | None = None):
+        if method == "eth_getLogs":
+            return await self._logs(params or [])
         last = None
         for k in range(len(self.urls) * 2):
             url = self.urls[(self._i + k) % len(self.urls)]

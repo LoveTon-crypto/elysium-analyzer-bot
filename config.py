@@ -42,7 +42,7 @@ BASED_TOKEN_PARAM = env("BASED_TOKEN_PARAM", "{ref}_b_{token}")
 
 # ---- deploys channel
 DEPLOY_CHANNEL = env("DEPLOY_CHANNEL", "@elysium_deploys")
-DEPLOY_POLL = float(env("DEPLOY_POLL", "1"))           # s between new-block checks
+DEPLOY_POLL = float(env("DEPLOY_POLL", "2"))           # s between new-block checks
 DEPLOY_ROUTE_WAIT = int(env("DEPLOY_ROUTE_WAIT", "90"))  # s to wait for the token's pool to show up
 DEPLOY_REFRESH = int(env("DEPLOY_REFRESH", "25"))     # s: edit the post once (dev buy, MC); 0 = off
 DEPLOY_MAX_LAG = int(env("DEPLOY_MAX_LAG", "3000"))   # blocks; further behind → jump to the head
