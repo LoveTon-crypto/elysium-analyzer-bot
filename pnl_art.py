@@ -82,7 +82,7 @@ def art_moneybag(ax, t):
     ax.text(0.5, 0.36, "$", color="#3d2f00", fontsize=70, fontweight="bold", ha="center", va="center")
     for cx, cy in ((0.12, 0.15), (0.88, 0.2), (0.15, 0.75), (0.86, 0.72), (0.8, 0.9)):
         ax.add_patch(P.Circle((cx, cy), 0.06, color=t["accent"], ec="#b8860b", lw=2))
-        ax.text(cx, cy, "N", color="#6b4f00", fontsize=14, fontweight="bold", ha="center", va="center")
+        ax.text(cx, cy, "H", color="#6b4f00", fontsize=14, fontweight="bold", ha="center", va="center")
 
 
 def art_chad_coin(ax, t):

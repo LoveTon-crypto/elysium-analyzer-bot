@@ -147,7 +147,7 @@ def ai_rocket(ax, t):
     # body
     rrect(ax, 0.33, 0.33, 0.34, 0.2, 0.06, "#9aa9bb", z=3)
     ell(ax, 0.5, 0.43, 0.12, 0.12, "#2b2d42", z=4, lw=2)
-    ax.text(0.5, 0.43, "N", color=t["main"], fontsize=17, fontweight="bold", ha="center", va="center", zorder=5)
+    ax.text(0.5, 0.43, "H", color=t["main"], fontsize=17, fontweight="bold", ha="center", va="center", zorder=5)
     # arms: thumbs up
     line(ax, [0.67, 0.8], [0.47, 0.6], OUT, 9, 2)
     line(ax, [0.67, 0.8], [0.47, 0.6], "#9aa9bb", 6, 2)
@@ -180,7 +180,7 @@ def astro_cat(ax, t):
     # flag
     line(ax, [0.8, 0.8], [0.22, 0.75], OUT, 4, 2)
     poly(ax, [(0.8, 0.75), (0.97, 0.7), (0.8, 0.63)], t["main"], z=3)
-    ax.text(0.855, 0.69, "N", color=OUT, fontsize=13, fontweight="bold", ha="center", va="center", zorder=4)
+    ax.text(0.855, 0.69, "H", color=OUT, fontsize=13, fontweight="bold", ha="center", va="center", zorder=4)
     # suit body
     rrect(ax, 0.3, 0.2, 0.36, 0.3, 0.1, "#f1f3f8", z=3)
     rrect(ax, 0.4, 0.28, 0.16, 0.1, 0.02, "#adb5bd", z=4, lw=2)
