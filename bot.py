@@ -16,6 +16,7 @@ import calls
 import config as C
 import links
 import scanner
+from bigbuys import MIN_HYPE, BigBuys
 from deploys import DeployFeed, ago
 from dex import DEFAULT_VENUES, Dex, parse_routers
 from evm import Rpc
@@ -34,6 +35,7 @@ NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 TOPICS = {level_key(v): f"Memepad token hit ${level_key(v).upper()} market cap" for v in C.MCAP_LEVELS}
 TOPICS["dip"] = f"Memepad dip alert (−{C.DIP_PCT:g}% or more in {C.DIP_WINDOW_MIN} min)"
+TOPICS["bigbuy"] = f"Big buys of {MIN_HYPE:g}+ HYPE (BIGBUY_HYPE in .env)"
 
 store = Store(C.DB_PATH)
 rpc = Rpc(C.RPC_URLS)
@@ -64,6 +66,7 @@ async def post(topic_key: str, text: str, image=None, kb=None):
 
 
 tracker = Tracker(store, market, post, ext)
+big = BigBuys(store, rpc, dex, market, post)
 
 
 # ---------------------------------------------------------------- owner
@@ -384,6 +387,8 @@ async def cmd_deploys(update: Update, ctx):
              f"Uptime {up // 3600}h{up % 3600 // 60:02d}m · new tokens {s['tokens']} · posted {s['posted']} · "
              f"not memepad {s['skipped']} · errors {s['errors']}",
              f"Last post: {ago(s['last_post']) + ' ago' if s['last_post'] else '—'}",
+             f"Big buys (≥{MIN_HYPE:g} HYPE): {big.stats['posted']} posted, last "
+             f"{ago(big.stats['last']) + ' ago' if big.stats['last'] else '—'}",
              f"Tracker: {tracker.last_count} tokens, last run "
              f"{ago(tracker.last_tick) + ' ago' if tracker.last_tick else '—'}"]
     if s["last_err"]:
@@ -445,6 +450,7 @@ async def on_startup(app: Application):
     rpc.start_health()
     app.create_task(feed.follow(app))
     app.create_task(tracker.run(app))
+    app.create_task(big.run(app))
     if C.BACKFILL_BLOCKS:
         app.create_task(feed.backfill(C.BACKFILL_BLOCKS))
 

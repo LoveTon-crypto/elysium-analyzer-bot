@@ -303,3 +303,44 @@ def test_swaps():
 if __name__ == "__main__":
     test_swaps()
     print("ok test_swaps")
+
+
+def test_bigbuys():
+    import bigbuys as BB
+    import swaps as S
+    buyer, mgr = "0x" + "b0" * 20, "0x" + "e2" * 20
+
+    def w(v):
+        return f"{v % (1 << 256):064x}"
+    big_swap = {"address": mgr, "topics": [S.V4_SWAP, "0x" + "11" * 32, "0x" + "0" * 64],
+                "transactionHash": "0xbig", "data": "0x" + w(-12 * 10 ** 18) + w(5 * 10 ** 25)}
+    small_swap = {**big_swap, "transactionHash": "0xsmall", "data": "0x" + w(-2 * 10 ** 18) + w(10 ** 24)}
+
+    class R:
+        async def req(self, m, p=None):
+            if m == "eth_getTransactionByHash":
+                return {"from": buyer, "value": hex(12 * 10 ** 18)}
+            if m == "eth_getTransactionReceipt":
+                return {"status": "0x1", "logs": [{"address": TOKEN, "topics": [S.TRANSFER, "0x" + "0" * 64,
+                                                                                 "0x" + buyer[2:].rjust(64, "0")],
+                                                    "data": hex(5 * 10 ** 25)}]}
+            raise AssertionError(m)
+    posts = []
+
+    async def post(key, text, img, kb):
+        posts.append((key, text))
+    store = Store(os.environ["DB_PATH"])
+    bb = BB.BigBuys(store, R(), types.SimpleNamespace(venues=[]), FakeMarket(), post)
+
+    async def go():
+        thr = int(BB.MIN_HYPE * 1e18 * 0.9)
+        assert await bb._big(big_swap, thr) and not await bb._big(small_swap, thr)
+        await bb._check("0xbig")
+    asyncio.run(go())
+    assert posts and posts[0][0] == "bigbuy", posts
+    assert "BIG BUY 12.00 HYPE" in posts[0][1] and "5.00% of supply" in posts[0][1], posts[0][1]
+
+
+if __name__ == "__main__":
+    test_bigbuys()
+    print("ok test_bigbuys")
