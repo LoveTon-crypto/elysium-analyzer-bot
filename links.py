@@ -29,9 +29,30 @@ def pad_of(venue) -> str | None:
     return venue.name.split()[0].upper()
 
 
+# v4 launchpads recognised by the hook of their pools (generic 'Uniswap V4' venue)
+V4_HOOKS = (("e0de", "a8ec", "ASCEND"), ("d80e67b5", "e8ec", "RONS"), ("6b1216a4", "f8ec", "MONTRA"),
+            ("e11cafa5", "20cc", "ELYSPUMP"), ("bacf71bf", "e0cc", "ELYSPUMP"))
+
+
+def pad_of_route(route) -> str | None:
+    """Like pad_of, but a pool found by the generic v4 venue is named by its hook; an unknown hook = 'UNIV4'."""
+    if route is None:
+        return None
+    if route.venue.kind == "v4any":
+        hook = route.key[-40:].lower() if route.key else ""
+        if not hook.strip("0"):
+            return None                     # plain pool without a hook: a DEX pool, not a launchpad
+        for head, tail, label in V4_HOOKS:
+            if hook.startswith(head) and hook.endswith(tail):
+                return label
+        return "UNIV4"
+    return pad_of(route.venue)
+
+
 def pad_title(label: str) -> str:
     return {"KLEOS": "Kleos", "ELYSPUMP": "ElysPump", "BOXA": "Boxa", "OBOL": "Obol", "MONTRA": "Montra",
-            "STOCKIUM": "Stockium", "ELYXA": "ELYXA"}.get(label, label.title())
+            "STOCKIUM": "Stockium", "ELYXA": "ELYXA", "ASCEND": "Ascend", "RONS": "RONS",
+            "UNIV4": "Uniswap V4"}.get(label, label.title())
 
 
 def token_page(label: str, token: str) -> str:

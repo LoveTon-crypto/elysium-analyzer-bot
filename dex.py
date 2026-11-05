@@ -122,7 +122,10 @@ DEFAULT_VENUES = ("kleos:Kleos=0x15c7ee481ce8c57461bc8620adc5fb784374c240,"
                   "v3:StockiumSwap=0x4f66184a9ffabb7f7071d590c2c48dedf41676f4/0xf7d8d5f9b9125b3d29c5778df5e54c1bbe77f224/-,"
                   "v3:Uniswap V3=0x367f85886af509e364c8190862bc714555fefc3e/0x10c2b8f290f90f373b9b86c14cdf532367d1a22e/-,"
                   "v2:Uniswap V2=0xe783de89a7f0408687f051e3e6d0beb62719ebad,"
-                  "v2:ElysPump V2=0x3320b5685c1c4a0d2a5b0ca30dcee095142bf076")
+                  "v2:ElysPump V2=0x3320b5685c1c4a0d2a5b0ca30dcee095142bf076,"
+                  # any other pool on the canonical v4 PoolManager (Ascend, RONS v4 …): key found from the token's trades
+                  "v4any:Uniswap V4=0xe2e105d3f7209a9da11f83ccf3e7398a753823f1/0x1b341fdd55d56f8e08409a2c25ddfad93eb03c1a"
+                  "/0x379f556c5a748bd7cc9baf0f7a344094ac1814f5")
 
 
 class NoPool(RuntimeError):
@@ -182,16 +185,16 @@ def parse_routers(spec: str) -> list[Venue]:
         pool_fee = 0
         if kind == "ep4" and len(a) == 4 and a[3].isdigit():
             pool_fee = int(a.pop())
-        if kind not in ("v2", "v3", "kleos", "kleos4", "elyxa", "obol", "kpair", "boxa4", "ep4") or not all(ADDR_RE.fullmatch(x) or x == "-" for x in a):
+        if kind not in ("v2", "v3", "kleos", "kleos4", "elyxa", "obol", "kpair", "boxa4", "ep4", "v4any") or not all(ADDR_RE.fullmatch(x) or x == "-" for x in a):
             raise ValueError(f"bad venue {part!r}")
         name = name.strip() or f"DEX{i + 1}"
         q = lambda x: "" if x == "-" else x
-        if kind in ("v3", "boxa4", "ep4"):
+        if kind in ("v3", "boxa4", "ep4", "v4any"):
             if len(a) != 3 or a[1] == "-":
                 raise ValueError(f"{kind} venue {name}: need 3 addresses")
             v = Venue(kind, name, a[1], quoter=q(a[2]))
-            if kind == "v3":
-                v.factory = a[0]
+            if kind in ("v3", "v4any"):
+                v.factory = a[0]          # v4any: the PoolManager
             elif kind == "boxa4":
                 v.launcher = a[0]
             else:
@@ -247,12 +250,75 @@ def ur_v4_swap(key: str, token: str, buy: bool, amount: int, min_out: int, deadl
     return UR_EXECUTE + _word(96) + _word(160) + _word(deadline) + bl("10") + _word(1) + _word(32) + bl(inp)
 
 
+# ---- any Uniswap v4 pool (Ascend and other launchpads we don't know): key found from the token's own trades
+V4_SWAP_TOPIC = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+CANON_WHYPE = "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+ADDRESS_THIS, MSG_SENDER = 2, 1                 # Universal Router recipient constants
+CONTRACT_BALANCE = 1 << 255
+A_SWAP_IN_SINGLE, A_SETTLE, A_SETTLE_ALL, A_TAKE, A_TAKE_ALL = "06", "0b", "0c", "0e", "0f"
+C_WRAP_ETH, C_UNWRAP_WETH, C_V4_SWAP = "0b", "0c", "10"
+
+
+def _keccak(hexdata: str) -> str:
+    from eth_utils import keccak
+    return "0x" + keccak(bytes.fromhex(hexdata)).hex().removeprefix("0x")
+
+
+def v4_quote_any(key: str, zero_for_one: bool, amount: int) -> str:
+    return V4_QUOTE + _word(32) + key + _word(int(zero_for_one)) + _word(amount) + _word(256) + _word(0)
+
+
+def _bytes_array(items: list[str]) -> str:
+    offs, o = [], 32 * len(items)
+    for p in items:
+        offs.append(_word(o))
+        o += len(bl(p)) // 2
+    return _word(len(items)) + "".join(offs) + "".join(bl(p) for p in items)
+
+
+def _ur(commands: str, inputs: list[str], deadline: int) -> str:
+    cmds = bl(commands)
+    return UR_EXECUTE + _word(96) + _word(96 + len(cmds) // 2) + _word(deadline) + cmds + _bytes_array(inputs)
+
+
+def _v4_swap_input(actions: str, params: list[str]) -> str:
+    """V4_SWAP command input: abi.encode(bytes actions, bytes[] params)."""
+    head_actions = bl(actions)
+    return _word(64) + _word(64 + len(head_actions) // 2) + head_actions + _bytes_array(params)
+
+
+def ur_v4_any(key: str, token: str, hype: str, buy: bool, amount: int, min_out: int, deadline: int) -> str:
+    """Universal Router swap through any v4 pool. hype = '0x0…' (native) or WHYPE: for WHYPE pools the router
+    wraps the HYPE sent with the tx before the swap and unwraps the proceeds of a sale."""
+    hype0 = int(key[:64], 16) == int(hype, 16)
+    zfo = hype0 if buy else not hype0
+    swap = _word(32) + key + _word(int(zfo)) + _word(amount) + _word(min_out) + _word(288) + _word(0)
+    native = int(hype, 16) == 0
+    if native:   # same as elysp.com: SWAP, SETTLE_ALL (pays the native HYPE sent with the tx), TAKE_ALL
+        cin, cout = (hype, token) if buy else (token, hype)
+        params = [swap, _addr(cin) + _word(amount), _addr(cout) + _word(min_out)]
+        return _ur(C_V4_SWAP, [_v4_swap_input(A_SWAP_IN_SINGLE + A_SETTLE_ALL + A_TAKE_ALL, params)], deadline)
+    if buy:      # WRAP_ETH into the router, swap paying WHYPE from the router, take the token to the buyer
+        wrap = _word(ADDRESS_THIS) + _word(CONTRACT_BALANCE)
+        params = [swap, _addr(hype) + _word(0) + _word(0), _addr(token) + _word(min_out)]   # SETTLE(cur, OPEN_DELTA, payerIsUser=false)
+        return _ur(C_WRAP_ETH + C_V4_SWAP, [wrap, _v4_swap_input(A_SWAP_IN_SINGLE + A_SETTLE + A_TAKE_ALL, params)],
+                   deadline)
+    # sell: user's token via Permit2, WHYPE taken into the router, unwrapped to the seller
+    params = [swap, _addr(token) + _word(amount), _addr(hype) + _word(ADDRESS_THIS) + _word(0)]   # TAKE(cur, router, OPEN_DELTA)
+    unwrap = _word(MSG_SENDER) + _word(min_out)
+    return _ur(C_V4_SWAP + C_UNWRAP_WETH, [_v4_swap_input(A_SWAP_IN_SINGLE + A_SETTLE_ALL + A_TAKE, params), unwrap],
+               deadline)
+
+
 class Dex:
     def __init__(self, rpc: Rpc, venues: list[Venue]):
         self.rpc, self.venues = rpc, venues
         self._venue_cache: dict[str, tuple[float, str, int, str, str]] = {}  # token → (ts, venue name, fee, pool, key)
         self._meta: dict[str, tuple[str, str, int]] = {}      # token → (name, symbol, decimals)
         self._supply: dict[str, tuple[float, int]] = {}       # token → (ts, total supply)
+        self._v4keys: dict[str, tuple[float, tuple | None]] = {}   # token → (ts, (key, hype currency) or None)
+        self._v4jobs: dict[str, asyncio.Task] = {}
 
     async def _check_venue(self, v: Venue):
         if v.kind == "v2":
@@ -265,7 +331,7 @@ class Dex:
         elif v.kind in ("kpair", "kleos4", "elyxa", "obol"):
             if len(await self.rpc.code(v.router)) < 4:
                 raise RuntimeError("no code")
-        else:  # v4 pools use native HYPE; check the contracts exist
+        else:  # v4 pools: check the contracts exist
             if len(await self.rpc.code(v.router)) < 4 or len(await self.rpc.code(v.quoter)) < 4:
                 raise RuntimeError("no code")
 
@@ -363,6 +429,9 @@ class Dex:
             if r.key == "pool":
                 return dec_uint(await self.rpc.call(v.router, encode(OB_QUOTE_POOL, token, 1, hype_in)))
             return dec_uint(await self.rpc.call(v.router, encode(K4_QUOTE_BUY, token, hype_in)))
+        if v.kind == "v4any":
+            hype0 = int(r.key[:64], 16) == int(r.via, 16)
+            return dec_uint(await self.rpc.call(v.quoter, v4_quote_any(r.key, hype0, hype_in)))
         if v.kind in ("boxa4", "ep4"):
             return dec_uint(await self.rpc.call(v.quoter, v4_quote_data(r.key, True, hype_in)))
         if v.kind == "kpair":
@@ -387,6 +456,9 @@ class Dex:
             if r.key == "pool":
                 return dec_uint(await self.rpc.call(v.router, encode(OB_QUOTE_POOL, token, 0, amount)))
             return dec_uint(await self.rpc.call(v.router, encode(K4_QUOTE_SELL, token, amount)))
+        if v.kind == "v4any":
+            hype0 = int(r.key[:64], 16) == int(r.via, 16)
+            return dec_uint(await self.rpc.call(v.quoter, v4_quote_any(r.key, not hype0, amount)))
         if v.kind in ("boxa4", "ep4"):
             return dec_uint(await self.rpc.call(v.quoter, v4_quote_data(r.key, False, amount)))
         if v.kind == "kpair":
@@ -442,6 +514,13 @@ class Dex:
                     if r.probe_out:
                         return [r]
                 return []
+            if v.kind == "v4any":
+                found = await self.v4_key(token, v.factory)
+                if not found:
+                    return []
+                r = Route(v, key=found[0], via=found[1])     # via = HYPE currency of the pool (0x0 or WHYPE)
+                r.probe_out = await self.quote_buy(r, token, PROBE)
+                return [r] if r.probe_out else []
             if v.kind in ("boxa4", "ep4"):
                 if v.kind == "boxa4":
                     raw = await self.rpc.call(v.launcher, encode(BOXA_POOL_KEY, token))
@@ -477,6 +556,78 @@ class Dex:
             return [r for r in await asyncio.gather(*(tier(f) for f in V3_FEES)) if r]
         except (RpcError, IndexError, ValueError):
             return []
+
+    def _hype_addrs(self) -> set[str]:
+        return {CANON_WHYPE, "0x" + "0" * 40} | {v.whype.lower() for v in self.venues if v.whype}
+
+    @staticmethod
+    def _key_candidates(data: str, token: str, hypes: set[str]):
+        """PoolKeys (currency0, currency1, fee, tickSpacing, hooks) spelled out in calldata, at any 4-byte alignment
+        (nested router calls shift the words by the 4-byte selectors)."""
+        d = data[2:] if data.startswith("0x") else data
+        tok = token[2:].lower().rjust(64, "0")
+        seen = set()
+        for start in range(0, 64, 8):
+            words = [d[i:i + 64] for i in range(start, len(d) - 63, 64)]
+            for i in range(len(words) - 4):
+                c0, c1, fee, ts, hk = words[i:i + 5]
+                if tok not in (c0, c1) or c0[:24] != "0" * 24 or c1[:24] != "0" * 24 or hk[:24] != "0" * 24:
+                    continue
+                other = "0x" + (c1 if c0 == tok else c0)[24:]
+                if other not in hypes or int(fee, 16) >= 1 << 24 or not 0 < int(ts, 16) < 1 << 15:
+                    continue
+                key = c0 + c1 + fee + ts + hk
+                if key not in seen:
+                    seen.add(key)
+                    yield key, other
+
+    async def v4_key(self, token: str, manager: str, wait: float = 4.0):
+        """(PoolKey, HYPE currency) of the token's v4 pool on this PoolManager, found from its recent trades:
+        a trade's receipt has the pool's Swap event (pool id), its calldata has the PoolKey — keccak(key) == id.
+        Cached; a search that takes longer than `wait` keeps going in the background for the next request."""
+        token = token.lower()
+        c = self._v4keys.get(token)
+        if c and (c[1] is not None or time.monotonic() - c[0] < 45):
+            return c[1]
+        job = self._v4jobs.get(token)
+        if job is None or job.done():
+            job = self._v4jobs[token] = asyncio.ensure_future(self._find_v4_key(token, manager))
+        try:
+            return await asyncio.wait_for(asyncio.shield(job), wait)
+        except asyncio.TimeoutError:
+            return None
+
+    async def _find_v4_key(self, token: str, manager: str):
+        res = None
+        try:
+            import logscan
+            head = int(await self.rpc.req("eth_blockNumber"), 16)
+            logs, _ = await logscan.scan_back(self.rpc, {"address": token, "topics": [TRANSFER_TOPIC]}, head,
+                                              lambda ls: len(ls) >= 4, 1_500_000)
+            hypes = self._hype_addrs()
+            for lg in reversed(logs[-10:]):
+                txh = lg["transactionHash"]
+                try:
+                    tx, rc = await asyncio.gather(self.rpc.req("eth_getTransactionByHash", [txh]),
+                                                  self.rpc.req("eth_getTransactionReceipt", [txh]))
+                except RpcError:
+                    continue
+                ids = {x["topics"][1] for x in (rc or {}).get("logs") or []
+                       if x.get("address", "").lower() == manager.lower() and (x.get("topics") or [""])[0] == V4_SWAP_TOPIC}
+                if not ids:
+                    continue
+                for key, hype in self._key_candidates((tx or {}).get("input") or "", token, hypes):
+                    if _keccak(key) in ids:
+                        res = (key, hype)
+                        break
+                if res:
+                    break
+        except Exception as ex:
+            log.info("v4 key %s: %s", token, ex)
+        self._v4keys[token] = (time.monotonic(), res)
+        if res:
+            log.info("v4 pool of %s: hook 0x%s, %s", token, res[0][-40:], "native HYPE" if int(res[1], 16) == 0 else "WHYPE")
+        return res
 
     async def _hype_keys(self, token: str) -> list[str]:
         """Candidate v4 PoolKeys (native HYPE, token) for a pair token: Kleos, then ElysPump, then Boxa."""
@@ -584,6 +735,8 @@ class Dex:
             to, data = v.router, BOXA_BUY + r.key + _word(min_out) + _addr(acct.address) + _word(deadline)
         elif v.kind == "ep4":
             to, data = v.router, ur_v4_swap(r.key, token, True, hype_in, min_out, deadline)
+        elif v.kind == "v4any":
+            to, data = v.router, ur_v4_any(r.key, token, r.via, True, hype_in, min_out, deadline)
         elif v.kind == "v3":
             to, data = v.router, encode(EXACT_INPUT_SINGLE, v.whype, token, r.fee, acct.address, deadline,
                                         hype_in, min_out, 0)
@@ -598,7 +751,7 @@ class Dex:
         r = await self.route(token)
         v = r.venue
         deadline = int(time.time()) + 300
-        if v.kind == "ep4":  # Universal Router pulls tokens through Permit2
+        if v.kind in ("ep4", "v4any"):  # Universal Router pulls tokens through Permit2
             if dec_uint(await self.rpc.call(token, encode(ALLOWANCE, acct.address, PERMIT2))) < amount:
                 await s.send(acct, token, encode(APPROVE, PERMIT2, UINT_MAX))
             p2 = await self.rpc.call(PERMIT2, encode(PERMIT2_ALLOWANCE, acct.address, token, v.router))
@@ -626,6 +779,8 @@ class Dex:
             data = BOXA_SELL + r.key + _word(amount) + _word(min_out) + _addr(acct.address) + _word(deadline)
         elif v.kind == "ep4":
             data = ur_v4_swap(r.key, token, False, amount, min_out, deadline)
+        elif v.kind == "v4any":
+            data = ur_v4_any(r.key, token, r.via, False, amount, min_out, deadline)
         elif v.kind == "v3":
             swap = encode(EXACT_INPUT_SINGLE, token, v.whype, r.fee, v.router, deadline, amount, min_out, 0)
             unwrap = encode(UNWRAP_WETH9, min_out, acct.address)

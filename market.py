@@ -59,7 +59,7 @@ class Market:
         price = route.price(tok.decimals)
         supply = tok.supply / 10 ** tok.decimals if tok.decimals is not None else 0
         liq = (route.liquidity or 0) / 1e18
-        return Snap(tok, route, price, price * supply, liq, hu, links.pad_of(route.venue))
+        return Snap(tok, route, price, price * supply, liq, hu, links.pad_of_route(route))
 
     async def try_snap(self, token: str, retries: int = 1) -> Snap | None:
         """None if no pool answers. A busy public node can make one venue's quote fail, so 'no pool' is retried."""
