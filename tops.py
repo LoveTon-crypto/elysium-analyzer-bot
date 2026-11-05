@@ -13,7 +13,7 @@ import math
 import time
 
 from evm import RpcError
-from swaps import TRANSFER, V3_SWAP, V4_SWAP
+from swaps import TRANSFER, V2_SWAP, V3_SWAP, V4_SWAP
 
 log = logging.getLogger("tops")
 NOT_MEMES = {"WHYPE", "HYPE", "KHYPE", "STHYPE", "KNTQ", "USDC", "USDT", "USDT0", "USDE", "USDH", "UETH", "UBTC",
@@ -61,6 +61,20 @@ class VolumeBook:
                         continue
                     a0 = _int(d[:64])                       # HYPE delta of the swapper: negative = paid = buy
                     self._book(token, abs(a0) / 1e18, a0 < 0)
+                elif t[0] == V2_SWAP:
+                    pool = lg["address"].lower()
+                    pair = pools_v3.get(pool)
+                    if not pair:
+                        continue
+                    t0, t1 = pair
+                    side = 0 if t0 in self.whype else 1 if t1 in self.whype else -1
+                    if side < 0:
+                        continue
+                    a_in = [int(d[0:64], 16), int(d[64:128], 16)]
+                    a_out = [int(d[128:192], 16), int(d[192:256], 16)]
+                    hype_in, hype_out = a_in[side], a_out[side]
+                    token = t1 if side == 0 else t0
+                    self._book(token, max(hype_in, hype_out) / 1e18, hype_in > 0)
                 elif t[0] == V3_SWAP:
                     pool = lg["address"].lower()
                     pair = pools_v3.get(pool)
@@ -130,7 +144,7 @@ def usd(x: float) -> str:
 TITLES = {"vol": "📊 <b>Top 10 Elysium · 24h volume</b>",
           "mc": "💰 <b>Top 10 Elysium memes · market cap</b>",
           "hot": "🔥 <b>Top 10 hot on Elysium</b>"}
-SUBS = {"vol": "<i>all swaps on Elysium pools, counted by the bot</i>",
+SUBS = {"vol": "<i>swaps on Elysium v4 / v3 / v2 pools, counted by the bot</i>",
         "mc": "<i>memepad tokens · on-chain price</i>",
         "hot": "<i>ranked by 6h activity: volume, trades, buy pressure, price move</i>"}
 
@@ -143,9 +157,10 @@ def fmt(kind: str, rows: list[dict], link) -> str:
     for i, r in enumerate(rows[:10]):
         ch = r.get("change")
         chs = f" {'🟢' if ch >= 0 else '🔴'} {ch:+.0f}% 24h" if ch is not None else ""
-        main = (f"Vol <b>{usd(r['vol'])}</b> · MC {usd(r['mc'])}" if kind == "vol" else
+        mc = usd(r["mc"]) if r.get("mc") else "—"
+        main = (f"Vol <b>{usd(r['vol'])}</b> · MC {mc}" if kind == "vol" else
                 f"MC <b>{usd(r['mc'])}</b> · Vol {usd(r['vol'])}" if kind == "mc" else
-                f"MC {usd(r['mc'])} · Vol 6h <b>{usd(r['vol6'])}</b> · {r.get('trades', 0)} txns")
+                f"MC {mc} · Vol 6h <b>{usd(r['vol6'])}</b> · {r.get('trades', 0)} txns")
         pad = r.get("pad_title") or ""
         lines.append(f'{medals[i]} <a href="{html.escape(link(r), quote=True)}"><b>${html.escape(r["symbol"][:12])}</b></a>'
                      f"{chs}" + (f" · {pad}" if pad else ""))

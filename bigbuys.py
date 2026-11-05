@@ -15,7 +15,7 @@ import links
 import scanner
 from evm import RpcError
 from links import e, usd
-from swaps import TRANSFER, V3_SWAP, V4_SWAP, TOKEN0, TOKEN1
+from swaps import TRANSFER, V2_SWAP, V3_SWAP, V4_SWAP, TOKEN0, TOKEN1
 
 log = logging.getLogger("bigbuys")
 
@@ -54,7 +54,7 @@ class BigBuys:
                 if head > self.cursor:
                     frm, to = self.cursor + 1, min(head, self.cursor + 2000)
                     logs = await self.rpc.req("eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(to),
-                                                               "topics": [[V4_SWAP, V3_SWAP]]}])
+                                                               "topics": [[V4_SWAP, V3_SWAP, V2_SWAP]]}])
                     cands = set()
                     for lg in logs or []:
                         if await self._big(lg, thr):
@@ -87,10 +87,12 @@ class BigBuys:
                 t0, t1 = await asyncio.gather(self.rpc.call(pool, TOKEN0), self.rpc.call(pool, TOKEN1))
                 self._pools[pool] = ("0x" + t0[-40:].lower(), "0x" + t1[-40:].lower())
             t0, t1 = self._pools[pool]
-            if t0 in self.whype:
-                return abs(_int(d[:64])) >= thr
-            if t1 in self.whype:
-                return abs(_int(d[64:128])) >= thr
+            side = 0 if t0 in self.whype else 1 if t1 in self.whype else -1
+            if side < 0:
+                return False
+            if lg["topics"][0] == V2_SWAP:      # amount0In, amount1In, amount0Out, amount1Out
+                return int(d[side * 64:(side + 1) * 64], 16) >= thr
+            return abs(_int(d[side * 64:(side + 1) * 64])) >= thr
         except (RpcError, IndexError, ValueError, KeyError):
             return False
         return False

@@ -362,7 +362,7 @@ async def top_text(kind: str) -> str:
     # MC for top tokens the tracker doesn't watch (seen only in swaps): one quick on-chain quote each
     need = [r for r in top if not r["mc"]]
     if need:
-        snaps = await asyncio.gather(*(asyncio.wait_for(market.try_snap(r["address"], retries=0), 8) for r in need),
+        snaps = await asyncio.gather(*(asyncio.wait_for(market.try_snap(r["address"], retries=0), 15) for r in need),
                                      return_exceptions=True)
         for r, sn in zip(need, snaps):
             if sn and not isinstance(sn, Exception):
