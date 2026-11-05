@@ -60,6 +60,7 @@ PAD_PAGES = {
     "ELYSPUMP": "https://elysp.com/#/token/{token}",
     "MONTRA": "https://montramarkets.xyz/token/{token}",
     "STOCKIUM": "https://stockium.fun/token/{token}",
+    "ASCEND": "https://app.ascendlaunch.xyz/tokens/{token}",
 }
 for _kv in env_list("PAD_PAGES"):
     if "=" in _kv:
