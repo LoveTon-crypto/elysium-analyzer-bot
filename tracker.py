@@ -56,7 +56,7 @@ class Tracker:
 
     async def tick(self):
         tokens = self.candidates()
-        sem = asyncio.Semaphore(6)
+        sem = asyncio.Semaphore(4)
 
         async def one(tok):
             async with sem:

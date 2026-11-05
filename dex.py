@@ -250,29 +250,55 @@ class Dex:
         self._meta: dict[str, tuple[str, str, int]] = {}      # token → (name, symbol, decimals)
         self._supply: dict[str, tuple[float, int]] = {}       # token → (ts, total supply)
 
+    async def _check_venue(self, v: Venue):
+        if v.kind == "v2":
+            v.whype = dec_addr(await self.rpc.call(v.router, WETH))
+            v.factory = dec_addr(await self.rpc.call(v.router, FACTORY))
+        elif v.kind == "v3":
+            v.whype = dec_addr(await self.rpc.call(v.router, "0x4aa4a4fc"))  # WETH9()
+        elif v.kind == "kleos":
+            v.whype = dec_addr(await self.rpc.call(v.router, K_WHYPE))
+        elif v.kind in ("kpair", "kleos4", "elyxa", "obol"):
+            if len(await self.rpc.code(v.router)) < 4:
+                raise RuntimeError("no code")
+        else:  # v4 pools use native HYPE; check the contracts exist
+            if len(await self.rpc.code(v.router)) < 4 or len(await self.rpc.code(v.quoter)) < 4:
+                raise RuntimeError("no code")
+
     async def init(self):
-        ok = []
-        for v in self.venues:
-            try:
-                if v.kind == "v2":
-                    v.whype = dec_addr(await self.rpc.call(v.router, WETH))
-                    v.factory = dec_addr(await self.rpc.call(v.router, FACTORY))
-                elif v.kind == "v3":
-                    v.whype = dec_addr(await self.rpc.call(v.router, "0x4aa4a4fc"))  # WETH9()
-                elif v.kind == "kleos":
-                    v.whype = dec_addr(await self.rpc.call(v.router, K_WHYPE))
-                elif v.kind in ("kpair", "kleos4", "elyxa", "obol"):
-                    if len(await self.rpc.code(v.router)) < 4:
-                        raise RuntimeError("no code")
-                else:  # v4 pools use native HYPE; check the contracts exist
-                    if len(await self.rpc.code(v.router)) < 4 or len(await self.rpc.code(v.quoter)) < 4:
-                        raise RuntimeError("no code")
+        """Checks every venue. One that failed because a node didn't answer (not because the contract is missing)
+        is retried in the background every minute — a slow node at start-up must not drop a venue for good."""
+        ok, retry = [], []
+        results = await asyncio.gather(*(self._check_venue(v) for v in self.venues), return_exceptions=True)
+        for v, res in zip(self.venues, results):
+            if res is None:
                 ok.append(v)
-            except Exception as ex:
-                log.error("venue %s %s unusable: %s", v.name, v.router, ex)
-        if not ok:
+            elif isinstance(res, RuntimeError) and str(res) == "no code":
+                log.error("venue %s %s unusable: no contract", v.name, v.router)
+            else:
+                log.warning("venue %s %s: %s — retrying in the background", v.name, v.router, res)
+                retry.append(v)
+        if not ok and not retry:
             raise SystemExit("no usable venue in ROUTERS")
         self.venues = ok
+        if retry:
+            asyncio.get_running_loop().create_task(self._retry_venues(retry))
+
+    async def _retry_venues(self, pending: list[Venue]):
+        while pending:
+            await asyncio.sleep(60)
+            for v in list(pending):
+                try:
+                    await self._check_venue(v)
+                except RuntimeError as ex:
+                    if str(ex) == "no code":
+                        pending.remove(v)
+                    continue
+                except Exception:
+                    continue
+                pending.remove(v)
+                self.venues.append(v)
+                log.info("venue %s is back", v.name)
 
     async def token(self, addr: str) -> Token:
         """Name/symbol/decimals cached for good, supply for a minute; the calls run in parallel."""

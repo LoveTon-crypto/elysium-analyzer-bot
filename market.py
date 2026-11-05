@@ -61,11 +61,16 @@ class Market:
         liq = (route.liquidity or 0) / 1e18
         return Snap(tok, route, price, price * supply, liq, hu, links.pad_of(route.venue))
 
-    async def try_snap(self, token: str) -> Snap | None:
-        try:
-            return await self.snap(token)
-        except (NoPool, RpcError, IndexError, ValueError):
-            return None
+    async def try_snap(self, token: str, retries: int = 1) -> Snap | None:
+        """None if no pool answers. A busy public node can make one venue's quote fail, so 'no pool' is retried."""
+        for i in range(retries + 1):
+            try:
+                return await self.snap(token)
+            except (NoPool, RpcError, IndexError, ValueError) as ex:
+                if i == retries:
+                    log.info("no pool %s: %s", token, ex)
+                    return None
+                await asyncio.sleep(1.5)
         except Exception as ex:
             log.info("snap %s: %s", token, ex)
             return None
