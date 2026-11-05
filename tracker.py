@@ -35,7 +35,7 @@ class Tracker:
                             "ORDER BY block DESC LIMIT ?", (now - C.TRACK_DAYS * 86400, C.TRACK_MIN_MC, C.TRACK_MAX))
         out = [r[0] for r in rows]
         vol = [r[0] for r in self.store.q("SELECT token FROM vol WHERE hour>=? GROUP BY token ORDER BY SUM(hype) DESC "
-                                          "LIMIT 30", (int(now // 3600) - 23,))] if self._has_vol() else []
+                                          "LIMIT 80", (int(now // 3600) - 23,))] if self._has_vol() else []
         for t in calls.recent_tokens(self.store.db, 30) + C.PAD_EXTRA + (self.ext.watched() if self.ext else []) + vol:
             if t not in out:
                 out.append(t)
@@ -110,7 +110,8 @@ class Tracker:
         log.info("MC %s alert %s (%.0f)", level_key(lvl), token, snap.mc)
 
     async def dip(self, token, snap, row, now):
-        if snap.liq < C.DIP_MIN_LIQ:
+        # v4 pools and pad curves don't report liquidity (0): filter tiny tokens by market cap instead
+        if (snap.liq and snap.liq < C.DIP_MIN_LIQ) or (not snap.liq and snap.mc < C.DIP_MIN_MC):
             return
         win = [(t, v) for t, v in self.hist.get(token, []) if now - t <= C.DIP_WINDOW_MIN * 60
                and t >= self.last_dip.get(token, 0)]

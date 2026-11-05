@@ -76,5 +76,6 @@ MCAP_LEVELS = sorted(int(float(x)) for x in env_list("MCAP_LEVELS", "10000,20000
 DIP_PCT = float(env("DIP_PCT", "15"))
 DIP_WINDOW_MIN = int(env("DIP_WINDOW_MIN", "60"))
 DIP_COOLDOWN_MIN = int(env("DIP_COOLDOWN_MIN", "60"))
-DIP_MIN_LIQ = float(env("DIP_MIN_LIQ", "300"))          # $ of HYPE in the pool
+DIP_MIN_LIQ = float(env("DIP_MIN_LIQ", "300"))          # $ of HYPE in the pool (where the pool reports it)
+DIP_MIN_MC = float(env("DIP_MIN_MC", "5000"))           # pools without a liquidity figure: minimum MC $
 PAD_EXTRA = [x.lower() for x in env_list("PAD_EXTRA")]
