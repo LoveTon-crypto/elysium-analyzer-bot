@@ -215,6 +215,7 @@ class DeployFeed:
                 key = t[2][2:].rjust(64, "0") + t[3][2:].rjust(64, "0") + d[0:64] + d[64:128] + d[128:192]
                 if _keccak(key) == t[1]:
                     self.dex._v4keys[token] = (time.monotonic(), (key, other))
+                    self.dex._save_v4keys()
                     log.info("v4 pool from launch tx %s: hook 0x%s", token, key[-40:])
                     return
         except Exception as ex:

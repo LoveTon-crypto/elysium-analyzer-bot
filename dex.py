@@ -319,6 +319,14 @@ class Dex:
         self._meta: dict[str, tuple[str, str, int]] = {}      # token → (name, symbol, decimals)
         self._supply: dict[str, tuple[float, int]] = {}       # token → (ts, total supply)
         self._v4keys: dict[str, tuple[float, tuple | None]] = {}   # token → (ts, (key, hype currency) or None)
+        self._v4file = os.getenv("V4_KEYS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "v4keys.json"))
+        try:   # pools found earlier survive restarts
+            import json
+            with open(self._v4file) as f:
+                for t, (k, h) in json.load(f).items():
+                    self._v4keys[t] = (time.monotonic(), (k, h))
+        except (OSError, ValueError):
+            pass
         self._v4jobs: dict[str, asyncio.Task] = {}
 
     async def _check_venue(self, v: Venue):
@@ -632,6 +640,7 @@ class Dex:
             log.info("v4 key %s: %s", token, ex)
         self._v4keys[token] = (time.monotonic(), res)
         if res:
+            self._save_v4keys()
             log.info("v4 pool of %s: hook 0x%s, %s", token, res[0][-40:], "native HYPE" if int(res[1], 16) == 0 else "WHYPE")
         return res
 
@@ -644,7 +653,8 @@ class Dex:
         tok = token.lower()
         for pid in ids:
             logs, _ = await logscan.scan_back(self.rpc, {"address": manager, "topics": [topic, pid]}, head,
-                                              lambda ls: bool(ls), int(os.getenv("V4_INIT_SEARCH_BLOCKS", "8000000")))
+                                              lambda ls: bool(ls), int(os.getenv("V4_INIT_SEARCH_BLOCKS", "8000000")),
+                                              conc=8)
             for lg in logs:
                 t = lg.get("topics") or []
                 if len(t) < 4:
@@ -660,6 +670,16 @@ class Dex:
                 if _keccak(key) == pid:
                     return key, other
         return None
+
+    def _save_v4keys(self):
+        try:
+            import json
+            data = {t: list(v[1]) for t, v in self._v4keys.items() if v[1]}
+            with open(self._v4file + ".tmp", "w") as f:
+                json.dump(data, f)
+            os.replace(self._v4file + ".tmp", self._v4file)
+        except OSError as ex:
+            log.debug("v4 keys save: %s", ex)
 
     def v4_searching(self, token: str) -> bool:
         job = self._v4jobs.get(token.lower())
