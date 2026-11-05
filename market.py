@@ -71,6 +71,7 @@ class Market:
                     log.info("no pool %s: %s", token, ex)
                     return None
                 await asyncio.sleep(1.5)
-        except Exception as ex:
-            log.info("snap %s: %s", token, ex)
-            return None
+            except Exception as ex:
+                log.info("snap %s: %s", token, ex)
+                return None
+        return None
