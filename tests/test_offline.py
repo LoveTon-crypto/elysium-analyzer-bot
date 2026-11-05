@@ -261,3 +261,45 @@ def test_chart_and_holders():
 if __name__ == "__main__":
     test_chart_and_holders()
     print("ok test_chart_and_holders")
+
+
+def test_swaps():
+    import swaps as S
+    tok, mgr, pid = TOKEN, "0x" + "e2" * 20, "0x" + "77" * 32
+
+    def w(v):
+        return f"{v % (1 << 256):064x}"
+
+    class R:
+        async def req(self, m, p=None):
+            if m == "eth_blockNumber":
+                return hex(1_000_000)
+            if m == "eth_getBlockByNumber":
+                b = int(p[0], 16)
+                return {"timestamp": hex(int(1_800_000_000 + b * 0.15))}
+            if m == "eth_getLogs":
+                f = p[0]
+                if f["address"] == tok:
+                    return [{"transactionHash": "0xaa", "blockNumber": hex(999_000)}]
+                if f["address"] == mgr and f["topics"][1] == pid:
+                    lo, hi = int(f["fromBlock"], 16), int(f["toBlock"], 16)
+                    out = []
+                    for b in range(max(lo, 600_000), hi + 1, 4000):   # a swap every 10 min, price rising
+                        price = 1e-8 * (1 + (b - 600_000) / 400_000)  # HYPE per token
+                        hype = 10 ** 17
+                        out.append({"blockNumber": hex(b), "data": "0x" + w(-hype) + w(int(hype / price))})
+                    return out
+                return []
+            if m == "eth_getTransactionReceipt":
+                return {"logs": [{"address": mgr, "topics": [S.V4_SWAP, pid, "0x" + "0" * 64], "data": "0x"}]}
+            raise AssertionError(m)
+    sh = S.SwapHistory(R())
+    cs = asyncio.run(sh.candles(tok, 18, 30.0))
+    assert len(cs) >= 60, len(cs)   # swaps cover the last ~16.7h
+    assert cs[-1][4] > cs[0][1] * 1.5, (cs[0], cs[-1])
+    assert abs(cs[-1][4] - 30 * 1e-8 * 2) / (60e-8) < 0.05, cs[-1]
+
+
+if __name__ == "__main__":
+    test_swaps()
+    print("ok test_swaps")

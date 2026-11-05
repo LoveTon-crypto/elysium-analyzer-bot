@@ -21,6 +21,7 @@ from dex import DEFAULT_VENUES, Dex, parse_routers
 from evm import Rpc
 from extdata import ExtData, render_chart
 from holders import HolderScanner, holder_lines
+from swaps import SwapHistory
 from links import e, usd
 from market import Market
 from store import Store
@@ -41,6 +42,7 @@ market = Market(rpc, dex)
 feed = DeployFeed(store, rpc, dex, market)
 ext = ExtData(store, feed.http)
 holders = HolderScanner(rpc, store, feed.http)
+swaps = SwapHistory(rpc)
 APP: Application | None = None
 
 
@@ -121,7 +123,7 @@ async def build_card(update: Update, address: str, make_call: bool):
         caller = calls.record_call(store.db, chat.id, address, u.id, u.first_name or "?", u.username or "",
                                    t.symbol, snap.mc if snap.hype_usd else 0)
     pair, hl = await asyncio.gather(ext.pair(address), holders.get(address, t.supply))
-    candles, src = await ext.candles(address, pair)
+    candles, src = await ext.candles(address, pair, t.decimals, snap.hype_usd, swaps)
 
     pad = snap.pad or (row or {}).get("pad") or ""
     created = (row or {}).get("ts") or (pair.created if pair else 0)
@@ -137,7 +139,9 @@ async def build_card(update: Update, address: str, make_call: bool):
     if snap.hype_usd:
         lines.append(f"💵 PRICE <b>{scanner.price_fmt(snap.price_usd)}</b> · <i>{e(snap.route.venue.name)}</i>")
         lines.append(f"💰 MC <b>{usd(snap.mc)}</b>" + (f"   🔥 ATH <b>{usd(ath)}</b>" if ath > snap.mc * 1.02 else ""))
-        lines.append(f"💧 LIQ <b>{usd(snap.liq or (pair.liq if pair else 0))}</b>")
+        liq = snap.liq or (pair.liq if pair else 0)
+        if liq:
+            lines.append(f"💧 LIQ <b>{usd(liq)}</b>")
     else:
         lines.append(f"💵 PRICE <b>{snap.price_hype:.10g} HYPE</b> · MC <b>{snap.mc_hype:,.0f} HYPE</b>")
     if pair:
@@ -168,7 +172,7 @@ async def build_card(update: Update, address: str, make_call: bool):
     if len(candles) >= 3:
         def k(v):
             return "up" if v >= 0 else "down"
-        cols = [("MCAP", usd(snap.mc), ""), ("LIQ", usd(snap.liq or (pair.liq if pair else 0)), ""),
+        cols = [("MCAP", usd(snap.mc), ""), ("LIQ", usd(snap.liq or (pair.liq if pair else 0)) if (snap.liq or pair) else "—", ""),
                 ("VOL", usd(pair.vol24) if pair else "—", ""), ("TXNS", str(pair.txns24) if pair else "—", "")]
         for key in ("h1", "h6"):
             if key in chg:

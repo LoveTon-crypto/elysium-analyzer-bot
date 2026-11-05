@@ -1,6 +1,7 @@
 """DexScreener pair, 15m candles (GeckoTerminal, else prices the bot recorded itself) and the chart image."""
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import time
@@ -155,13 +156,19 @@ class ExtData:
         self._gt[token] = (time.monotonic(), rows)
         return rows
 
-    async def candles(self, token: str, pair: Pair | None) -> tuple[list[tuple], str]:
-        """(candles, source): GeckoTerminal when it has the pool, else prices the bot recorded on-chain."""
-        rows = await self.gecko_candles(token, pair)
-        local = self.local_candles(token)
-        if len(rows) >= 3 and len(rows) >= len(local):
-            return rows, "GeckoTerminal"
-        return local, "on-chain"
+    async def candles(self, token: str, pair: Pair | None, decimals: int = 18, hype_usd: float = 0.0,
+                      swaps=None) -> tuple[list[tuple], str]:
+        """(candles, source): GeckoTerminal if it has the pool, else the pool's past swaps on-chain, else the
+        prices the bot recorded itself — whichever covers the most time."""
+        opts = [(await self.gecko_candles(token, pair), "GeckoTerminal")]
+        if swaps is not None:
+            try:
+                opts.append((await asyncio.wait_for(swaps.candles(token, decimals, hype_usd), 20), "on-chain swaps"))
+            except asyncio.TimeoutError:
+                log.info("swaps %s: timeout", token)
+        opts.append((self.local_candles(token), "on-chain"))
+        rows, src = max(opts, key=lambda o: len(o[0]))
+        return (rows, src) if len(rows) >= 3 else ([], "")
 
 
 def _price_fmt(p: float) -> str:
