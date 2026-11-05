@@ -34,10 +34,15 @@ class Tracker:
         rows = self.store.q("SELECT token FROM deploys WHERE posted<>-1 AND pad<>'' AND (ts>? OR last_mc>=?) "
                             "ORDER BY block DESC LIMIT ?", (now - C.TRACK_DAYS * 86400, C.TRACK_MIN_MC, C.TRACK_MAX))
         out = [r[0] for r in rows]
-        for t in calls.recent_tokens(self.store.db, 30) + C.PAD_EXTRA + (self.ext.watched() if self.ext else []):
+        vol = [r[0] for r in self.store.q("SELECT token FROM vol WHERE hour>=? GROUP BY token ORDER BY SUM(hype) DESC "
+                                          "LIMIT 30", (int(now // 3600) - 23,))] if self._has_vol() else []
+        for t in calls.recent_tokens(self.store.db, 30) + C.PAD_EXTRA + (self.ext.watched() if self.ext else []) + vol:
             if t not in out:
                 out.append(t)
         return out
+
+    def _has_vol(self) -> bool:
+        return bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vol'"))
 
     def points(self, token: str) -> list[tuple]:
         """[(ts, 0, 0, 0, mc)] — candle-like rows for calls.render_pnl (supply = 1)."""

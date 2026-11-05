@@ -308,48 +308,76 @@ async def on_callers(update: Update, ctx):
 
 
 # ---------------------------------------------------------------- /top /topmc /topdex
-async def _row(token: str, sem) -> dict | None:
-    async with sem:
-        snap = await market.try_snap(token)
-    if not snap or not snap.hype_usd or snap.token.symbol.upper() in tops.NOT_MEMES:
-        return None
+def _fast_row(token: str, hu: float) -> dict | None:
+    """Row from what the bot already recorded (price/MC every minute, volume from swaps) — no node requests."""
+    last = store.q("SELECT ts, price, mc FROM prices WHERE token=? ORDER BY ts DESC LIMIT 1", (token,))
     row = store.deploy(token) or {}
-    pad = snap.pad or row.get("pad") or ""
+    fresh = last and time.time() - last[0][0] < 1800
+    mc = (last[0][2] if fresh else 0) or (row.get("last_mc") or 0)
+    sym = row.get("symbol") or ""
+    sym_r = store.q("SELECT symbol FROM tok_sym WHERE token=?", (token,)) if not sym else []
+    sym = sym or (sym_r[0][0] if sym_r else "")
+    if not sym or sym.upper() in tops.NOT_MEMES:
+        return None
+    pad = row.get("pad") or ""
     v24, b24, s24 = book.stats(token, 24)
     v6, b6, s6 = book.stats(token, 6)
     v1, _, _ = book.stats(token, 1)
-    ch = ext.changes(token, snap.price_usd)
-    return dict(address=token, symbol=snap.token.symbol, mc=snap.mc, vol=v24 * snap.hype_usd, vol6=v6 * snap.hype_usd,
-                vol1=v1 * snap.hype_usd, trades=b6 + s6, buys=b6, change=ch.get("h24"), ch6=ch.get("h6", 0.0),
-                pad=pad, pad_title=links.pad_title(pad) if pad else "", url="")
+    ch = ext.changes(token, last[0][1]) if fresh else {}
+    return dict(address=token, symbol=sym, mc=mc, vol=v24 * hu, vol6=v6 * hu, vol1=v1 * hu, trades=b6 + s6, buys=b6,
+                change=ch.get("h24"), ch6=ch.get("h6", 0.0), pad=pad, pad_title=links.pad_title(pad) if pad else "", url="")
+
+
+async def _ensure_symbols(tokens: list[str]):
+    """Symbols for tokens the bot only saw in swaps (not deploys), cached in the database."""
+    store.q("CREATE TABLE IF NOT EXISTS tok_sym (token TEXT PRIMARY KEY, symbol TEXT)")
+    missing = [t for t in tokens if not (store.deploy(t) or {}).get("symbol")
+               and not store.q("SELECT 1 FROM tok_sym WHERE token=?", (t,))]
+
+    async def one(t):
+        try:
+            tk = await asyncio.wait_for(dex.token(t), 5)
+            store.q("INSERT OR REPLACE INTO tok_sym (token, symbol) VALUES (?, ?)", (t, tk.symbol))
+        except Exception:
+            pass
+    await asyncio.gather(*(one(t) for t in missing[:30]))
 
 
 async def top_text(kind: str) -> str:
-    sem = asyncio.Semaphore(8)
+    hu = await market.hype_usd() or 0
     vol_tokens = [r[0] for r in book.top_volume(24, 40)]
-    if kind == "vol":
-        cands = vol_tokens
-    else:
-        cands = list(dict.fromkeys(vol_tokens + tracker.candidates()))[:120]
-    rows = [r for r in await asyncio.gather(*(_row(t, sem) for t in cands)) if r]
+    cands = vol_tokens if kind == "vol" else list(dict.fromkeys(vol_tokens + tracker.candidates()))
+    await _ensure_symbols(cands)
+    rows = [r for r in (_fast_row(t, hu) for t in cands) if r]
     if kind == "vol":
         rows.sort(key=lambda r: r["vol"], reverse=True)
     elif kind == "mc":
-        rows = sorted([r for r in rows if r["pad"]], key=lambda r: r["mc"], reverse=True)
+        rows = sorted([r for r in rows if r["pad"] and r["mc"] > 0], key=lambda r: r["mc"], reverse=True)
     else:
-        for r in rows[:60]:          # DexScreener data where it lists the token (boosts, real trade counts)
-            p = await ext.pair(r["address"])
-            if p:
-                r["url"] = p.url
-                r["vol6"] = max(r["vol6"], p.vol24 / 4)
         rows = [r for r in rows if r["vol6"] > 0]
         for r in rows:
             r["score"] = tops.hot_score(r["vol6"], r["vol1"], r["trades"], r["buys"], r["ch6"] or 0)
         rows.sort(key=lambda r: r["score"], reverse=True)
+    top = rows[:10]
+    # MC for top tokens the tracker doesn't watch (seen only in swaps): one quick on-chain quote each
+    need = [r for r in top if not r["mc"]]
+    if need:
+        snaps = await asyncio.gather(*(asyncio.wait_for(market.try_snap(r["address"], retries=0), 8) for r in need),
+                                     return_exceptions=True)
+        for r, sn in zip(need, snaps):
+            if sn and not isinstance(sn, Exception):
+                r["mc"] = sn.mc
+                if not r["pad"] and sn.pad:
+                    r["pad"], r["pad_title"] = sn.pad, links.pad_title(sn.pad)
+    if kind == "hot":
+        for r in top:
+            p = await ext.pair(r["address"])
+            if p:
+                r["url"] = p.url
 
     def link(r):
         return r.get("url") or (links.token_page(r["pad"], r["address"]) if r["pad"] else f"{C.EXPLORER}/token/{r['address']}")
-    return tops.fmt(kind, rows, link)
+    return tops.fmt(kind, top, link)
 
 
 def top_kb(active: str) -> InlineKeyboardMarkup:
