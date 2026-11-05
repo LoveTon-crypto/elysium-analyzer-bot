@@ -100,7 +100,7 @@ def test_links():
     assert links.pad_of(v("v2", "Uniswap V2")) is None
     t = "0x" + "ab" * 20
     assert links.degen_link(t) == f"https://t.me/elysiumdegen_bot?start=_{'ab' * 20}"
-    assert links.based_link(t) == "https://t.me/based_eth_bot?start=r_Ramram"
+    assert links.based_link(t) == f"https://t.me/based_eth_bot?start=r_Ramram_b_{t}"
     assert is_lp("UNI-V2", "Uniswap V2") and not is_lp("HELP", "Help coin")
 
 

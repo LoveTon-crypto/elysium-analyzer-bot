@@ -38,7 +38,7 @@ DEGEN_REF = env("DEGEN_REF")                   # your referral code in Degen bot
 BASED_BOT = env("BASED_BOT", "based_eth_bot").lstrip("@")
 BASED_REF = env("BASED_REF", "r_Ramram")
 # Start parameter of Based bot for one token, {ref} and {token} are replaced. Empty = referral link only.
-BASED_TOKEN_PARAM = env("BASED_TOKEN_PARAM")
+BASED_TOKEN_PARAM = env("BASED_TOKEN_PARAM", "{ref}_b_{token}")
 
 # ---- deploys channel
 DEPLOY_CHANNEL = env("DEPLOY_CHANNEL")
