@@ -13,6 +13,7 @@ from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import calls
+import digest
 import config as C
 import links
 import scanner
@@ -35,6 +36,7 @@ NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 TOPICS = {level_key(v): f"Memepad token hit ${level_key(v).upper()} market cap" for v in C.MCAP_LEVELS}
 TOPICS["dip"] = f"Memepad dip alert (−{C.DIP_PCT:g}% or more in {C.DIP_WINDOW_MIN} min)"
+TOPICS["daily"] = f"Daily top-5 gainers / top-3 losers (24h), posted at {C.env('DIGEST_TIME', '18:00')}"
 TOPICS["bigbuy"] = f"Big buys of {MIN_HYPE:g}+ HYPE (BIGBUY_HYPE in .env)"
 
 store = Store(C.DB_PATH)
@@ -97,7 +99,7 @@ def admin_help() -> str:
             "📈 <b>Group alerts</b>: add me to a forum group as admin, open a topic and send "
             "<code>/settopic dip</code>\nKeys:\n" +
             "\n".join(f"<code>{k}</code> — {html.escape(v)}" for k, v in TOPICS.items()) +
-            "\n/topics · /unsettopic &lt;key&gt; · /test &lt;key&gt;")
+            "\n/topics · /unsettopic &lt;key&gt; · /test &lt;key&gt; · /digest — post the daily top now")
 
 
 # ---------------------------------------------------------------- scan card
@@ -301,6 +303,65 @@ async def on_callers(update: Update, ctx):
     await q.answer()
 
 
+# ---------------------------------------------------------------- daily digest
+async def digest_rows() -> list[dict]:
+    """24h change of every watched memepad / called token from the prices the bot records each minute."""
+    now = time.time()
+    rows = []
+    for token in tracker.candidates():
+        last = store.q("SELECT ts, price, mc FROM prices WHERE token=? ORDER BY ts DESC LIMIT 1", (token,))
+        old = store.q("SELECT ts, price FROM prices WHERE token=? AND ts>=? ORDER BY ts LIMIT 1", (token, now - 86400))
+        if not last or not old or now - last[0][0] > 1800 or last[0][0] - old[0][0] < 20 * 3600 or not old[0][1]:
+            continue
+        mc = last[0][2] or 0
+        if mc < digest.MIN_MC:
+            continue
+        row = store.deploy(token) or {}
+        sym, name = row.get("symbol") or "", row.get("name") or ""
+        if not sym:
+            try:
+                tk = await dex.token(token)
+                sym, name = tk.symbol, tk.name
+            except Exception:
+                sym = links.short(token)
+        rows.append(dict(address=token, symbol=sym, name=name, change=(last[0][1] / old[0][1] - 1) * 100,
+                         fdv=mc, vol=0, liq=0, url="", icon=None, pad=row.get("pad") or ""))
+    return rows
+
+
+async def post_digest(_ctx=None) -> bool:
+    if not store.topic("daily"):
+        return False
+    up, down = digest.pick(await digest_rows())
+    if not up and not down:
+        log.info("digest: nothing to post")
+        return False
+    for r in up + down:     # volume and picture from DexScreener when the token is listed there
+        p = await ext.pair(r["address"])
+        if p:
+            r["vol"], r["icon"], r["url"] = p.vol24, p.image or None, p.url
+    icons = await digest.fetch_icons(up + down)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    date_str = datetime.now(ZoneInfo(C.env("DIGEST_TZ", "Europe/Minsk"))).strftime("%d %b %Y")
+    png = await asyncio.to_thread(digest.render, up, down, icons, date_str)
+
+    def link(r):
+        return links.token_page(r["pad"], r["address"]) if r["pad"] else (r["url"] or f"{C.EXPLORER}/token/{r['address']}")
+    await post("daily", digest.text(up, down, link), png)
+    log.info("digest posted: %d up, %d down", len(up), len(down))
+    return True
+
+
+async def cmd_digest(update: Update, ctx):
+    if not is_owner(update):
+        return
+    if not store.topic("daily"):
+        return await update.effective_message.reply_html("Bind a topic first: <code>/settopic daily</code> inside the topic.")
+    if not await post_digest():
+        await update.effective_message.reply_text("Not enough price history yet: the bot needs ~24h of prices first.")
+
+
 # ---------------------------------------------------------------- start / admin
 async def cmd_start(update: Update, ctx):
     msg = update.effective_message
@@ -469,12 +530,16 @@ def main():
                      ("callers", cmd_callers), ("settopic", cmd_settopic), ("unsettopic", cmd_unsettopic),
                      ("topics", cmd_topics), ("test", cmd_test), ("setdeploys", cmd_setdeploys),
                      ("deploys", cmd_deploys), ("deploytest", cmd_deploytest), ("deploypost", cmd_deploypost),
-                     ("pads", cmd_pads)]:
+                     ("pads", cmd_pads), ("digest", cmd_digest)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_refresh, pattern=r"^rf:"))
     app.add_handler(CallbackQueryHandler(on_pnl, pattern=r"^pnl:"))
     app.add_handler(CallbackQueryHandler(on_callers, pattern=r"^top:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    hh, mm = (int(x) for x in C.env("DIGEST_TIME", "18:00").split(":"))
+    app.job_queue.run_daily(post_digest, time=dt.time(hh, mm, tzinfo=ZoneInfo(C.env("DIGEST_TZ", "Europe/Minsk"))))
     log.info("Elysium Analyzer starting")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
