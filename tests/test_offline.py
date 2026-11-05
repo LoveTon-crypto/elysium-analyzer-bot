@@ -136,7 +136,7 @@ class FakeDex:
 class FakeMarket:
     mc = 5000.0
 
-    async def try_snap(self, a):
+    async def try_snap(self, a, retries=1):
         r = Route(Venue("kleos", "Kleos", "0x" + "1" * 40), probe_out=1, liquidity=10 ** 19)
         price = self.mc / 30 / 1e9
         return Snap(TOK, r, price, price * 1e9, 10, 30.0, "KLEOS")
