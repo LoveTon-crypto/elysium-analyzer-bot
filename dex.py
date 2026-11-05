@@ -75,7 +75,11 @@ KP_QUOTE_BUY, KP_QUOTE_SELL = "0xd0485b1a", "0x2cb22bf2"
 K_PAIR_TOKEN, K_HOOK = "0x999b93af", "0x7f5a7c7b"   # on Kleos v5 tokens
 
 ZERO = "0x" + "0" * 40
-PROBE = to_wei("0.1")  # HYPE used to compare venues
+PROBE = to_wei("0.1")
+import os as _os
+CACHE_TTL = float(_os.getenv("ROUTE_CACHE_SEC", "1800"))     # how long a token's venue is remembered
+ROUTE_GRACE = float(_os.getenv("ROUTE_GRACE_SEC", "0.7"))    # after the first pool is found, wait this long for others
+ROUTE_DEADLINE = float(_os.getenv("ROUTE_DEADLINE_SEC", "5"))  # whole search, at most  # HYPE used to compare venues
 log = logging.getLogger("dex")
 
 # Defaults verified on Elysium mainnet; override with ROUTERS in .env
@@ -499,27 +503,51 @@ class Dex:
         return keys
 
     async def route(self, token: str) -> Route:
-        """Venue that gives the most tokens for PROBE HYPE. The winning venue is remembered for 5 minutes,
-        so trades and refreshes re-check only that venue."""
+        """Venue that gives the most tokens for PROBE HYPE. The winning venue is remembered for 30 minutes, so
+        trades and refreshes re-check only that venue. A fresh search asks every venue at once but doesn't wait for
+        the slowest: once a pool is found it waits ROUTE_GRACE more for a better one, and never longer than
+        ROUTE_DEADLINE in total (a lagging public node used to hold the whole card for seconds)."""
         c = self._venue_cache.get(token.lower())
-        if c and time.monotonic() - c[0] < 300:
+        if c and time.monotonic() - c[0] < CACHE_TTL:
             v = next((x for x in self.venues if x.name == c[1]), None)
             if v:
                 for r in await self._routes_at(v, token):
                     if r.fee == c[2] and r.pool == c[3] and r.key == c[4]:
                         return r
+        t0 = time.monotonic()
+        self.last_route_timing = {}
+
         async def timed(v):
             ts = time.monotonic()
             try:
                 return await self._routes_at(v, token)
             finally:
                 self.last_route_timing[v.name] = time.monotonic() - ts
-        self.last_route_timing = {}
-        found = await asyncio.gather(*(timed(v) for v in self.venues))
-        slow = {k: round(t, 2) for k, t in self.last_route_timing.items() if t > 1}
-        if slow:
-            log.info("route %s: slow venues %s", token[:10], slow)
-        routes = [r for rs in found for r in rs]
+        tasks = {asyncio.ensure_future(timed(v)): v for v in self.venues}
+        routes: list[Route] = []
+        first_found = None
+        pending = set(tasks)
+        while pending:
+            now = time.monotonic()
+            limit = t0 + ROUTE_DEADLINE
+            if first_found is not None:
+                limit = min(limit, first_found + ROUTE_GRACE)
+            if now >= limit:
+                break
+            done, pending = await asyncio.wait(pending, timeout=limit - now, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                try:
+                    got = t.result()
+                except Exception:
+                    got = []
+                if got:
+                    routes += got
+                    if first_found is None:
+                        first_found = time.monotonic()
+        for t in pending:
+            t.cancel()
+        if pending:
+            log.info("route %s: skipped slow venues %s", token[:10], [tasks[t].name for t in pending])
         if not routes:
             raise NoPool("пул с HYPE не найден ни на одной площадке")
         best = max(routes, key=lambda r: r.probe_out)
