@@ -4,10 +4,8 @@ from __future__ import annotations
 import logging
 import re
 
-import httpx
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup
 
-import config as C
 import links
 from links import e, usd  # noqa: F401  (calls.py imports usd from here)
 
@@ -32,27 +30,6 @@ def price_fmt(p: float) -> str:
         sub = "".join("₀₁₂₃₄₅₆₇₈₉"[int(d)] for d in str(zeros))
         return f"$0.0{sub}{s[zeros:zeros + 4]}"
     return f"${p:.{zeros + 4}f}"
-
-
-async def holders(http: httpx.AsyncClient, token: str) -> tuple[int | None, list[tuple[str, int]]]:
-    """(holder count, top-10 [(address, raw amount)]) from a Blockscout-style explorer API; empty if unavailable."""
-    if not C.EXPLORER_API:
-        return None, []
-    count, top = None, []
-    try:
-        r = await http.get(f"{C.EXPLORER_API}/tokens/{token}/counters", timeout=6)
-        if r.status_code < 400:
-            v = r.json().get("token_holders_count")
-            count = int(v) if v is not None else None
-        r = await http.get(f"{C.EXPLORER_API}/tokens/{token}/holders", timeout=6)
-        if r.status_code < 400:
-            for it in (r.json().get("items") or [])[:10]:
-                a = ((it.get("address") or {}).get("hash") or "").lower()
-                if a:
-                    top.append((a, int(it.get("value") or 0)))
-    except Exception as ex:
-        log.debug("holders %s: %s", token, ex)
-    return count, top
 
 
 def card_lines(snap, row: dict | None, extra: list[str] | None = None) -> list[str]:

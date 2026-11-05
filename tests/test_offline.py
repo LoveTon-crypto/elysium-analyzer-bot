@@ -210,3 +210,54 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_chart_and_holders():
+    import time as _t
+    import extdata
+    from holders import HolderScanner, holder_lines
+    store = Store(os.environ["DB_PATH"])
+    ext = extdata.ExtData(store, None)
+    now = _t.time()
+    for i in range(40):                     # 40 recorded prices, one per 5 min
+        store.q("INSERT INTO prices (token, ts, price, mc) VALUES (?,?,?,?)",
+                (TOKEN, now - (40 - i) * 300, 1e-6 * (1 + i / 10), 1000 * (1 + i / 10)))
+    cs = ext.local_candles(TOKEN)
+    assert len(cs) >= 10 and cs[-1][4] > cs[0][1], cs[:3]
+    ch = ext.changes(TOKEN, 5e-6)
+    assert "h1" in ch and "h24" not in ch, ch
+    png = extdata.render_chart("MCAT", "Moon Cat", "3h", cs, [("MCAP", "$5K", ""), ("1H", "↑20%", "up")], 12.3,
+                               "on-chain")
+    assert png[:4] == b"\x89PNG"
+    ext.watch(TOKEN, 1)
+    assert TOKEN in ext.watched()
+
+    holder_a, holder_b, pool = "0x" + "1" * 40, "0x" + "2" * 40, "0x" + "3" * 40
+
+    def tlog(f, t, v):
+        return {"topics": [extdata.__name__ and "0xddf2", "0x" + f[2:].rjust(64, "0"), "0x" + t[2:].rjust(64, "0")],
+                "data": hex(v)}
+
+    class R:
+        async def req(self, m, p=None):
+            if m == "eth_blockNumber":
+                return hex(200)
+            if m == "eth_getLogs":
+                z = "0x" + "0" * 40
+                return [tlog(z, pool, 10 ** 27), tlog(pool, holder_a, 6 * 10 ** 25), tlog(pool, holder_b, 2 * 10 ** 25)]
+            raise AssertionError(m)
+
+        async def code(self, a):
+            return "0x6080" if a == pool else "0x"
+    hs = HolderScanner(R(), store, None)
+    h = asyncio.run(hs._onchain(TOKEN, 10 ** 27))
+    assert h.total == 3 and h.top[0][0] == pool and h.top[0][2], h
+    assert abs(h.top10 - 8.0) < 1e-9, h.top10
+    lines = holder_lines(h, lambda a: "x/" + a, dev=holder_b)
+    assert lines[0].startswith("👥 <b>3</b> holders · TOP-10: <b>8.0%</b>"), lines
+    assert "🛠" in lines[1] and "🏊 Contracts" in lines[-1], lines
+
+
+if __name__ == "__main__":
+    test_chart_and_holders()
+    print("ok test_chart_and_holders")

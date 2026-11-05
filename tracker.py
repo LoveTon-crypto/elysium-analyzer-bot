@@ -19,9 +19,9 @@ def level_key(v: int) -> str:
 
 
 class Tracker:
-    def __init__(self, store, market, post):
-        """post: async (topic_key, text, image, keyboard) → message | None."""
-        self.store, self.market, self.post = store, market, post
+    def __init__(self, store, market, post, ext=None):
+        """post: async (topic_key, text, image, keyboard) → message | None; ext: extdata.ExtData (price history)."""
+        self.store, self.market, self.post, self.ext = store, market, post, ext
         self.hist: dict[str, list[tuple[float, float]]] = {}   # token → [(ts, mc $)] for dips and PnL lines
         self.last_dip: dict[str, float] = {}
         self.known: set[str] = set()       # tokens seen in this run (first sighting doesn't alert old levels)
@@ -34,7 +34,7 @@ class Tracker:
         rows = self.store.q("SELECT token FROM deploys WHERE posted<>-1 AND pad<>'' AND (ts>? OR last_mc>=?) "
                             "ORDER BY block DESC LIMIT ?", (now - C.TRACK_DAYS * 86400, C.TRACK_MIN_MC, C.TRACK_MAX))
         out = [r[0] for r in rows]
-        for t in calls.recent_tokens(self.store.db, 30) + C.PAD_EXTRA:
+        for t in calls.recent_tokens(self.store.db, 30) + C.PAD_EXTRA + (self.ext.watched() if self.ext else []):
             if t not in out:
                 out.append(t)
         return out
@@ -75,6 +75,8 @@ class Tracker:
                          (mc, mc if (row["ts"] or 0) > now - C.ATH_DAYS * 86400 else 0, token))
             row["ath"] = max(row["ath"] or 0, mc)
         calls.update_mcap(self.store.db, token, mc)
+        if self.ext:
+            self.ext.record(token, snap.price_usd, mc)
         h = [(t, v) for t, v in self.hist.get(token, []) if now - t <= 7 * 86400][-2000:]
         h.append((now, mc))
         self.hist[token] = h

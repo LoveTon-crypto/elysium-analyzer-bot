@@ -8,7 +8,7 @@ import logging
 import re
 import time
 
-from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup, LinkPreviewOptions, Update
+from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup, InputMediaPhoto, LinkPreviewOptions, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -19,6 +19,8 @@ import scanner
 from deploys import DeployFeed, ago
 from dex import DEFAULT_VENUES, Dex, parse_routers
 from evm import Rpc
+from extdata import ExtData, render_chart
+from holders import HolderScanner, holder_lines
 from links import e, usd
 from market import Market
 from store import Store
@@ -37,6 +39,8 @@ rpc = Rpc(C.RPC_URLS)
 dex = Dex(rpc, parse_routers(C.ROUTERS or DEFAULT_VENUES))
 market = Market(rpc, dex)
 feed = DeployFeed(store, rpc, dex, market)
+ext = ExtData(store, feed.http)
+holders = HolderScanner(rpc, store, feed.http)
 APP: Application | None = None
 
 
@@ -57,7 +61,7 @@ async def post(topic_key: str, text: str, image=None, kb=None):
         return None
 
 
-tracker = Tracker(store, market, post)
+tracker = Tracker(store, market, post, ext)
 
 
 # ---------------------------------------------------------------- owner
@@ -92,59 +96,102 @@ def admin_help() -> str:
 
 
 # ---------------------------------------------------------------- scan card
+def pct_fmt(x: float) -> str:
+    return f"{'🟢' if x >= 0 else '🔴'} {x:+.1f}%"
+
+
+def visible_len(s: str) -> int:
+    return len(html.unescape(re.sub(r"<[^>]+>", "", s)))
+
+
 async def build_card(update: Update, address: str, make_call: bool):
+    """(text, keyboard, chart png | None) — or (None, None, None) if there's no pool."""
     snap = await market.try_snap(address)
     if not snap:
-        return None, None
+        return None, None, None
+    t = snap.token
     row = store.deploy(address)
     chat, u = update.effective_chat, update.effective_user
     if snap.mc > 0 and snap.hype_usd:
         calls.update_mcap(store.db, address, snap.mc)
+        ext.record(address, snap.price_usd, snap.mc)
+    ext.watch(address, C.TRACK_DAYS)          # scanned tokens get price history for the chart
     caller = calls.get_call(store.db, chat.id, address)
     if caller is None and make_call and chat.type != ChatType.PRIVATE and u and not u.is_bot:
         caller = calls.record_call(store.db, chat.id, address, u.id, u.first_name or "?", u.username or "",
-                                   snap.token.symbol, snap.mc if snap.hype_usd else 0)
-    count, top = await scanner.holders(feed.http, address)
-    extra = []
-    t = snap.token
-    if t.supply:
-        extra.append(f"🏦 Supply: {links.amount(t.supply / 10 ** t.decimals)}")
-    if snap.route:
-        extra.append(f"🔁 Pool: {e(snap.route.venue.name)}")
-    if row and row.get("ts"):
-        extra.append(f"🕒 Age: {ago(row['ts'])}")
-    dev = (row or {}).get("dev")
+                                   t.symbol, snap.mc if snap.hype_usd else 0)
+    pair, hl = await asyncio.gather(ext.pair(address), holders.get(address, t.supply))
+    candles, src = await ext.candles(address, pair)
+
+    pad = snap.pad or (row or {}).get("pad") or ""
+    created = (row or {}).get("ts") or (pair.created if pair else 0)
+    age = ago(created) if created else ""
+    dev = (row or {}).get("dev") or ""
+    pad_url = links.token_page(pad, address) if pad else ""
+    title_url = pad_url or (pair.url if pair else "") or f"{C.EXPLORER}/token/{address}"
+    head = f"${e(t.symbol.upper())}" + (f" · ⏱ {age}" if age else "") + (f" · {e(links.pad_title(pad))}" if pad else "")
+    lines = [f'<a href="{e(title_url)}"><b>{e(t.name)}</b></a>', head, "", f"<code>{address}</code>", ""]
+    chg = (pair.chg if pair and pair.chg else ext.changes(address, snap.price_usd))
+    ath = max((row or {}).get("ath") or 0, snap.mc, max((c[2] for c in candles), default=0) * t.supply / 10 ** t.decimals
+              if candles and snap.hype_usd else 0)
+    if snap.hype_usd:
+        lines.append(f"💵 PRICE <b>{scanner.price_fmt(snap.price_usd)}</b> · <i>{e(snap.route.venue.name)}</i>")
+        lines.append(f"💰 MC <b>{usd(snap.mc)}</b>" + (f"   🔥 ATH <b>{usd(ath)}</b>" if ath > snap.mc * 1.02 else ""))
+        lines.append(f"💧 LIQ <b>{usd(snap.liq or (pair.liq if pair else 0))}</b>")
+    else:
+        lines.append(f"💵 PRICE <b>{snap.price_hype:.10g} HYPE</b> · MC <b>{snap.mc_hype:,.0f} HYPE</b>")
+    if pair:
+        lines.append(f"🔄 VOL 24H <b>{usd(pair.vol24)}</b> · TXNS <b>{pair.txns24}</b>")
+    if chg:
+        lines.append(" · ".join(f"{k[1:].upper()} <b>{chg[k]:+.1f}%</b>" for k in ("h1", "h6", "h24") if k in chg))
     if dev:
         n = store.q("SELECT COUNT(*) FROM deploys WHERE dev=? AND posted<>-1", (dev,))[0][0]
-        extra.append(f'👤 Dev: <a href="{links.addr_link(dev)}">{links.short(dev)}</a> · deploys {n}')
-    if count:
-        extra.append(f"👥 Holders: {count:,}")
-    if top and t.supply:
-        rows = []
-        for a, v in top:
-            tag = " (dev)" if dev and a == dev else ""
-            rows.append(f'<a href="{links.addr_link(a)}">{links.short(a)}</a> {v / t.supply * 100:.2f}%{tag}')
-        extra.append("🐳 Top 10: " + " · ".join(rows[:10]))
-    lines = scanner.card_lines(snap, row, extra)
+        lines.append(f'🛠 Dev <a href="{links.addr_link(dev)}">{links.short(dev)}</a> · deploys {n}')
     if caller:
         lines += [""] + calls.caller_line(caller, snap.mc, e)
+    lines.append("")
+    lines += holder_lines(hl, links.addr_link, dev)
+
     hx = address[2:].lower()
-    kb = [links.buy_row(address),
-          [B(f"📈 {links.pad_title(snap.pad or 'ELYSIUM')}", url=links.token_page(snap.pad or '', address)),
-           B("🔄", callback_data=f"rf:{hx}")]]
+    row2 = []
+    if pair and pair.url:
+        row2.append(B("📈 DexScreener", url=pair.url))
+    if pad:
+        row2.append(B(f"🚀 {links.pad_title(pad)}", url=pad_url))
+    row2.append(B("👥 Holders", url=f"{C.EXPLORER}/token/{address}"))
+    row3 = [B("🔄 Refresh", callback_data=f"rf:{hx}")]
     if caller:
-        kb[1].append(B("📊 PnL", callback_data=f"pnl:{hx}"))
-    return "\n".join(lines), InlineKeyboardMarkup(kb)
+        row3.append(B("📊 PnL", callback_data=f"pnl:{hx}"))
+    kb = InlineKeyboardMarkup([links.buy_row(address), row2, row3])
+
+    png = None
+    if len(candles) >= 3:
+        def k(v):
+            return "up" if v >= 0 else "down"
+        cols = [("MCAP", usd(snap.mc), ""), ("LIQ", usd(snap.liq or (pair.liq if pair else 0)), ""),
+                ("VOL", usd(pair.vol24) if pair else "—", ""), ("TXNS", str(pair.txns24) if pair else "—", "")]
+        for key in ("h1", "h6"):
+            if key in chg:
+                cols.append((key[1:].upper() + "H", f"{'↑' if chg[key] >= 0 else '↓'}{abs(chg[key]):.2f}%", k(chg[key])))
+        try:
+            png = await asyncio.to_thread(render_chart, t.symbol, t.name, age, candles, cols, chg.get("h24"), src)
+        except Exception as ex:
+            log.info("chart %s: %s", address, ex)
+    return "\n".join(lines), kb, png
 
 
 async def send_card(update: Update, address: str, quiet: bool, make_call: bool):
-    text, kb = await build_card(update, address, make_call)
+    text, kb, png = await build_card(update, address, make_call)
     msg = update.effective_message
     if not text:
         if not quiet:
             await msg.reply_html(f"❌ No HYPE pool found for <code>{e(address)}</code> on Elysium "
                                  "(Kleos, ElysPump, Boxa, ELYXA, Obol, Montra, Stockium, Uniswap).")
         return
+    if png and visible_len(text) <= 1024:
+        return await msg.reply_photo(png, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    if png:
+        await msg.reply_photo(png)
     await msg.reply_html(text, reply_markup=kb, link_preview_options=NO_PREVIEW)
 
 
@@ -163,11 +210,16 @@ async def on_text(update: Update, ctx):
 
 async def on_refresh(update: Update, ctx):
     q = update.callback_query
-    text, kb = await build_card(update, "0x" + q.data[3:], False)
+    text, kb, png = await build_card(update, "0x" + q.data[3:], False)
     if not text:
         return await q.answer("Pool not found right now.", show_alert=True)
     try:
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, link_preview_options=NO_PREVIEW)
+        if q.message.photo and png and visible_len(text) <= 1024:
+            await q.edit_message_media(InputMediaPhoto(png, caption=text, parse_mode=ParseMode.HTML), reply_markup=kb)
+        elif q.message.photo:
+            await q.edit_message_reply_markup(reply_markup=kb)
+        else:
+            await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, link_preview_options=NO_PREVIEW)
     except Exception as ex:
         log.info("refresh: %s", ex)
     await q.answer("Updated")
