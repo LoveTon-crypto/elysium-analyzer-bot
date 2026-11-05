@@ -344,3 +344,39 @@ def test_bigbuys():
 if __name__ == "__main__":
     test_bigbuys()
     print("ok test_bigbuys")
+
+
+def test_volume_book():
+    import swaps as S
+    import tops
+    pool3, mgr = "0x" + "33" * 20, "0x" + "e2" * 20
+    whype = "0x" + "77" * 20
+
+    def w(v):
+        return f"{v % (1 << 256):064x}"
+
+    class R:
+        async def req(self, m, p=None):
+            assert m == "eth_getTransactionReceipt"
+            return {"logs": [{"address": TOKEN, "topics": [S.TRANSFER, "0x" + "0" * 64, "0x" + "0" * 64],
+                              "data": hex(4 * 10 ** 24)}]}
+    store = Store(os.environ["DB_PATH"])
+    vb = tops.VolumeBook(store, R(), {whype})
+    v4 = {"address": mgr, "topics": [S.V4_SWAP, "0x" + "aa" * 32, "0x" + "0" * 64], "transactionHash": "0x1",
+          "data": "0x" + w(-3 * 10 ** 18) + w(4 * 10 ** 24)}
+    v3 = {"address": pool3, "topics": [S.V3_SWAP, "0x" + "0" * 64, "0x" + "0" * 64], "transactionHash": "0x2",
+          "data": "0x" + w(2 * 10 ** 18) + w(-(10 ** 24))}
+
+    async def go():
+        await vb.add([v4, v3], {pool3: (whype, TOKEN)})   # v4 pool unknown yet → resolved in background
+        await asyncio.sleep(0.05)
+        await vb.add([v4], {})
+    asyncio.run(go())
+    vol, buys, sells = vb.stats(TOKEN, 24)
+    assert abs(vol - 5.0) < 1e-9 and buys == 2 and sells == 0, (vol, buys, sells)
+    assert vb.top_volume()[0][0] == TOKEN
+
+
+if __name__ == "__main__":
+    test_volume_book()
+    print("ok test_volume_book")

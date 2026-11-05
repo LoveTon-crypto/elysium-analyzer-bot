@@ -14,6 +14,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 import calls
 import digest
+import tops
 import config as C
 import links
 import scanner
@@ -69,6 +70,8 @@ async def post(topic_key: str, text: str, image=None, kb=None):
 
 tracker = Tracker(store, market, post, ext)
 big = BigBuys(store, rpc, dex, market, post)
+book = tops.VolumeBook(store, rpc, big.whype)
+big.book = book
 
 
 # ---------------------------------------------------------------- owner
@@ -86,7 +89,8 @@ WELCOME = ("👋 <b>Elysium Analyzer</b>\n\n"
            "the analysis: price, market cap, liquidity, ATH, launchpad, dev wallet and their other deploys, "
            "top holders.\n\n"
            "🎯 In groups the first person to drop a contract gets the call — tap 📊 PnL under the card, "
-           "and /callers shows the best callers.")
+           "and /callers shows the best callers.\n\n"
+           "📊 /top — top 10 by 24h volume\n💰 /topmc — top 10 by market cap\n🔥 /topdex — hot right now")
 
 
 def admin_help() -> str:
@@ -303,6 +307,85 @@ async def on_callers(update: Update, ctx):
     await q.answer()
 
 
+# ---------------------------------------------------------------- /top /topmc /topdex
+async def _row(token: str, sem) -> dict | None:
+    async with sem:
+        snap = await market.try_snap(token)
+    if not snap or not snap.hype_usd or snap.token.symbol.upper() in tops.NOT_MEMES:
+        return None
+    row = store.deploy(token) or {}
+    pad = snap.pad or row.get("pad") or ""
+    v24, b24, s24 = book.stats(token, 24)
+    v6, b6, s6 = book.stats(token, 6)
+    v1, _, _ = book.stats(token, 1)
+    ch = ext.changes(token, snap.price_usd)
+    return dict(address=token, symbol=snap.token.symbol, mc=snap.mc, vol=v24 * snap.hype_usd, vol6=v6 * snap.hype_usd,
+                vol1=v1 * snap.hype_usd, trades=b6 + s6, buys=b6, change=ch.get("h24"), ch6=ch.get("h6", 0.0),
+                pad=pad, pad_title=links.pad_title(pad) if pad else "", url="")
+
+
+async def top_text(kind: str) -> str:
+    sem = asyncio.Semaphore(8)
+    vol_tokens = [r[0] for r in book.top_volume(24, 40)]
+    if kind == "vol":
+        cands = vol_tokens
+    else:
+        cands = list(dict.fromkeys(vol_tokens + tracker.candidates()))[:120]
+    rows = [r for r in await asyncio.gather(*(_row(t, sem) for t in cands)) if r]
+    if kind == "vol":
+        rows.sort(key=lambda r: r["vol"], reverse=True)
+    elif kind == "mc":
+        rows = sorted([r for r in rows if r["pad"]], key=lambda r: r["mc"], reverse=True)
+    else:
+        for r in rows[:60]:          # DexScreener data where it lists the token (boosts, real trade counts)
+            p = await ext.pair(r["address"])
+            if p:
+                r["url"] = p.url
+                r["vol6"] = max(r["vol6"], p.vol24 / 4)
+        rows = [r for r in rows if r["vol6"] > 0]
+        for r in rows:
+            r["score"] = tops.hot_score(r["vol6"], r["vol1"], r["trades"], r["buys"], r["ch6"] or 0)
+        rows.sort(key=lambda r: r["score"], reverse=True)
+
+    def link(r):
+        return r.get("url") or (links.token_page(r["pad"], r["address"]) if r["pad"] else f"{C.EXPLORER}/token/{r['address']}")
+    return tops.fmt(kind, rows, link)
+
+
+def top_kb(active: str) -> InlineKeyboardMarkup:
+    names = {"vol": "📊 Volume", "mc": "💰 MCap", "hot": "🔥 Hot"}
+    return InlineKeyboardMarkup([[B(("• " if k == active else "") + v, callback_data="tl:" + k) for k, v in names.items()]])
+
+
+async def send_top(update: Update, kind: str):
+    msg = await update.effective_message.reply_html("⏳ Counting…")
+    await msg.edit_text(await top_text(kind), parse_mode=ParseMode.HTML, reply_markup=top_kb(kind),
+                        link_preview_options=NO_PREVIEW)
+
+
+async def cmd_top(update: Update, ctx):
+    await send_top(update, "vol")
+
+
+async def cmd_topmc(update: Update, ctx):
+    await send_top(update, "mc")
+
+
+async def cmd_topdex(update: Update, ctx):
+    await send_top(update, "hot")
+
+
+async def on_toplist(update: Update, ctx):
+    q = update.callback_query
+    kind = q.data.split(":", 1)[1]
+    await q.answer("Loading…")
+    try:
+        await q.edit_message_text(await top_text(kind), parse_mode=ParseMode.HTML, reply_markup=top_kb(kind),
+                                  link_preview_options=NO_PREVIEW)
+    except Exception as ex:
+        log.info("toplist: %s", ex)
+
+
 # ---------------------------------------------------------------- daily digest
 async def digest_rows() -> list[dict]:
     """24h change of every watched memepad / called token from the prices the bot records each minute."""
@@ -340,7 +423,12 @@ async def post_digest(_ctx=None) -> bool:
         p = await ext.pair(r["address"])
         if p:
             r["vol"], r["icon"], r["url"] = p.vol24, p.image or None, p.url
-    icons = await digest.fetch_icons(up + down)
+    icons = await digest.fetch_icons(up + down)        # DexScreener pictures, if any
+    for r in up + down:                                 # otherwise the picture from the token's launch tx
+        if r["address"] not in icons:
+            img = await feed.logo(r["address"])
+            if img:
+                icons[r["address"]] = img
     from datetime import datetime
     from zoneinfo import ZoneInfo
     date_str = datetime.now(ZoneInfo(C.env("DIGEST_TZ", "Europe/Minsk"))).strftime("%d %b %Y")
@@ -530,11 +618,13 @@ def main():
                      ("callers", cmd_callers), ("settopic", cmd_settopic), ("unsettopic", cmd_unsettopic),
                      ("topics", cmd_topics), ("test", cmd_test), ("setdeploys", cmd_setdeploys),
                      ("deploys", cmd_deploys), ("deploytest", cmd_deploytest), ("deploypost", cmd_deploypost),
-                     ("pads", cmd_pads), ("digest", cmd_digest)]:
+                     ("pads", cmd_pads), ("digest", cmd_digest),
+                     ("top", cmd_top), ("topmc", cmd_topmc), ("topdex", cmd_topdex)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_refresh, pattern=r"^rf:"))
     app.add_handler(CallbackQueryHandler(on_pnl, pattern=r"^pnl:"))
     app.add_handler(CallbackQueryHandler(on_callers, pattern=r"^top:"))
+    app.add_handler(CallbackQueryHandler(on_toplist, pattern=r"^tl:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     import datetime as dt
     from zoneinfo import ZoneInfo

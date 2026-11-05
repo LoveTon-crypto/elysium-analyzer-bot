@@ -39,6 +39,7 @@ class BigBuys:
         self.sem = asyncio.Semaphore(6)
         self.bot_username = ""
         self.stats = {"posted": 0, "checked": 0, "last": 0.0}
+        self.book = None          # tops.VolumeBook: every swap is also booked as volume
 
     async def run(self, app):
         self.bot_username = app.bot.username
@@ -58,6 +59,8 @@ class BigBuys:
                     for lg in logs or []:
                         if await self._big(lg, thr):
                             cands.add(lg["transactionHash"])
+                    if self.book is not None:
+                        await self.book.add(logs or [], self._pools)
                     for h in cands:
                         if h not in self._done:
                             self._done[h] = time.monotonic()

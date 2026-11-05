@@ -204,10 +204,26 @@ class DeployFeed:
             rc = None
         m = await meta.resolve(self.http, (tx or {}).get("input") or "", (rc or {}).get("logs") or [], name, symbol)
         img = await meta.image_bytes(self.http, m.get("image", ""))
+        if m.get("image") and row:
+            self.store.q("UPDATE deploys SET image=? WHERE token=?", (m["image"], token))
         if len(self._meta) > 500:
             self._meta.clear()
         self._meta[token] = (m, img)
         return m, img
+
+    async def logo(self, token: str) -> bytes | None:
+        """Token picture from its launch tx (cached), for tables like the daily digest."""
+        row = self.store.deploy(token) or {}
+        if token in self._meta:
+            return self._meta[token][1]
+        if row.get("image"):
+            return await meta.image_bytes(self.http, row["image"])
+        if row.get("tx"):
+            try:
+                return (await self._token_meta(token, None, row.get("name") or "", row.get("symbol") or ""))[1]
+            except Exception:
+                return None
+        return None
 
     async def build(self, token: str, bot_username: str, tx: dict | None = None, snap=None):
         token = token.lower()

@@ -24,6 +24,9 @@ class Store:
             CREATE INDEX IF NOT EXISTS deploys_dev ON deploys(dev);
             CREATE INDEX IF NOT EXISTS deploys_ts ON deploys(ts);
         """)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(deploys)")}
+        if "image" not in cols:
+            self.db.execute("ALTER TABLE deploys ADD COLUMN image TEXT DEFAULT ''")
         self.db.commit()
         calls.migrate(self.db)
 
