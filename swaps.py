@@ -12,6 +12,7 @@ import asyncio
 import logging
 import time
 
+import logscan
 from evm import RpcError
 
 log = logging.getLogger("swaps")
@@ -61,21 +62,8 @@ class SwapHistory:
         self._bt: tuple | None = None   # (block, ts, seconds per block, monotonic) anchor
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def _logs(self, flt: dict, frm: int, to: int, max_calls: int = 60) -> list[dict]:
-        out, step, b, calls = [], 100_000, frm, 0
-        while b <= to and calls < max_calls:
-            e = min(to, b + step - 1)
-            try:
-                got = await self.rpc.req("eth_getLogs", [{**flt, "fromBlock": hex(b), "toBlock": hex(e)}])
-            except RpcError:
-                if step > 2000:
-                    step //= 4
-                    continue
-                raise
-            calls += 1
-            out += got or []
-            b = e + 1
-        return out
+    async def _logs(self, flt: dict, frm: int, to: int, max_calls: int = 0) -> list[dict]:
+        return await logscan.get_logs(self.rpc, flt, frm, to)
 
     async def block_time(self, head: int) -> tuple[int, float, float]:
         """(head, its timestamp, seconds per block); the rate is re-measured every 10 minutes."""
@@ -92,11 +80,8 @@ class SwapHistory:
     async def _find_pool(self, token: str, head: int, spb: float):
         """Pool of the token from the Swap event in the receipt of its latest transfer."""
         span = int(WINDOW * 3 / spb)
-        logs = []
-        for back in (span // 30, span // 6, span):
-            logs = await self._logs({"address": token, "topics": [TRANSFER]}, max(1, head - back), head, 20)
-            if logs:
-                break
+        logs, _ = await logscan.scan_back(self.rpc, {"address": token, "topics": [TRANSFER]}, head,
+                                          lambda ls: len(ls) >= 3, span)
         v4_ids: dict[tuple[str, str], int] = {}
         for lg in reversed(logs[-8:]):
             try:

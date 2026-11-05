@@ -7,13 +7,14 @@ import logging
 from dataclasses import dataclass, field
 
 import config as C
+import logscan
 from evm import RpcError
 
 log = logging.getLogger("holders")
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ZERO = "0x" + "0" * 40
 DEAD = {ZERO, "0x000000000000000000000000000000000000dead"}
-MAX_CHUNKS = int(C.env("HOLDERS_MAX_CHUNKS", "60"))     # getLogs calls per scan (first scan of an old token)
+MAX_BLOCKS = int(C.env("HOLDERS_MAX_BLOCKS", "6000000"))   # how far back to look for an old token's launch
 
 
 @dataclass
@@ -42,7 +43,7 @@ class HolderScanner:
         if h and h.top:
             return h
         try:
-            return await asyncio.wait_for(self._onchain(token, supply), 25)
+            return await asyncio.wait_for(self._onchain(token, supply), 90)
         except Exception as ex:
             log.info("holders on-chain %s: %s", token, ex)
             return Holders()
@@ -66,65 +67,50 @@ class HolderScanner:
             log.info("holders api %s: %s", token, ex)
             return None
 
-    async def _start_block(self, token: str, head: int) -> tuple[int, bool]:
-        row = self.store.deploy(token)
-        if row and row.get("block"):
-            return int(row["block"]), False
-        # find the creation block by binary search on eth_getCode (needs historical state on the node)
-        lo, hi = max(1, head - 5_000_000), head
-        try:
-            if (await self.rpc.req("eth_getCode", [token, hex(lo)])) not in ("0x", "0x0", None):
-                return lo, True
-            while hi - lo > 1:
-                mid = (lo + hi) // 2
-                code = await self.rpc.req("eth_getCode", [token, hex(mid)])
-                if code and code not in ("0x", "0x0"):
-                    hi = mid
-                else:
-                    lo = mid
-            return hi, False
-        except RpcError:
-            return max(1, head - MAX_CHUNKS * 10_000), True
-
     async def _onchain(self, token: str, supply: int) -> Holders:
+        """First call: all Transfer logs of the token since launch (from the launch block if the bot saw it,
+        else read backwards until the mint of the whole supply). Later calls only read the new blocks."""
         lock = self._locks.setdefault(token, asyncio.Lock())
         async with lock:
             head = int(await self.rpc.req("eth_blockNumber"), 16)
             st = self._state.get(token)
+            flt = {"address": token, "topics": [TRANSFER]}
             if not st:
-                start, partial = await self._start_block(token, head)
-                st = {"block": start - 1, "bal": {}, "partial": partial}
+                row = self.store.deploy(token)
+                if row and row.get("block"):
+                    logs = await logscan.get_logs(self.rpc, flt, int(row["block"]), head)
+                    partial = False
+                else:
+                    zero_topic = "0x" + "0" * 64
+
+                    def minted_all(ls):
+                        m = sum(int(x.get("data") or "0x0", 16) for x in ls
+                                if len(x.get("topics") or []) == 3 and x["topics"][1] == zero_topic)
+                        return supply and m >= supply * 0.999
+                    logs, _ = await logscan.scan_back(self.rpc, flt, head, minted_all, MAX_BLOCKS)
+                    partial = not minted_all(logs)
+                st = {"block": head, "bal": {}, "partial": partial}
+                self._apply(st["bal"], logs)
                 self._state[token] = st
-            step, calls = 50_000, 0
-            while st["block"] < head and calls < MAX_CHUNKS:
-                frm, to = st["block"] + 1, min(head, st["block"] + step)
-                try:
-                    logs = await self.rpc.req("eth_getLogs", [{"address": token, "fromBlock": hex(frm),
-                                                               "toBlock": hex(to), "topics": [TRANSFER]}])
-                except RpcError as ex:
-                    if step > 1000:
-                        step //= 4
-                        continue
-                    raise ex
-                calls += 1
-                bal = st["bal"]
-                for lg in logs or []:
-                    t = lg.get("topics") or []
-                    if len(t) != 3:
-                        continue
-                    f, to_a = "0x" + t[1][-40:], "0x" + t[2][-40:]
-                    v = int(lg.get("data") or "0x0", 16)
-                    bal[f] = bal.get(f, 0) - v
-                    bal[to_a] = bal.get(to_a, 0) + v
-                st["block"] = to
-            if st["block"] < head:
-                st["partial"] = True
-                st["block"] = head  # skip what's left: count from here on
+            elif st["block"] < head:
+                self._apply(st["bal"], await logscan.get_logs(self.rpc, flt, st["block"] + 1, head))
+                st["block"] = head
             live = {a: v for a, v in st["bal"].items() if v > 0 and a not in DEAD}
             ranked = sorted(live.items(), key=lambda x: -x[1])[:12]
             flags = await asyncio.gather(*(self._is_contract(a) for a, _ in ranked))
             top = [(a, v / supply * 100 if supply else 0, c) for (a, v), c in zip(ranked, flags)]
             return Holders(len(live), top, st["partial"], "on-chain")
+
+    @staticmethod
+    def _apply(bal: dict, logs: list[dict]):
+        for lg in logs:
+            t = lg.get("topics") or []
+            if len(t) != 3:
+                continue
+            f, to_a = "0x" + t[1][-40:], "0x" + t[2][-40:]
+            v = int(lg.get("data") or "0x0", 16)
+            bal[f] = bal.get(f, 0) - v
+            bal[to_a] = bal.get(to_a, 0) + v
 
     async def _is_contract(self, a: str) -> bool:
         if a not in self._code:

@@ -106,8 +106,9 @@ def visible_len(s: str) -> int:
     return len(html.unescape(re.sub(r"<[^>]+>", "", s)))
 
 
-async def build_card(update: Update, address: str, make_call: bool):
-    """(text, keyboard, chart png | None) — or (None, None, None) if there's no pool."""
+async def build_card(update: Update, address: str, make_call: bool, slow: bool = True):
+    """(text, keyboard, chart png | None) — or (None, None, None) if there's no pool.
+    slow=False skips holders and the chart (they can take a while for an old token) for a first quick reply."""
     snap = await market.try_snap(address)
     if not snap:
         return None, None, None
@@ -122,8 +123,11 @@ async def build_card(update: Update, address: str, make_call: bool):
     if caller is None and make_call and chat.type != ChatType.PRIVATE and u and not u.is_bot:
         caller = calls.record_call(store.db, chat.id, address, u.id, u.first_name or "?", u.username or "",
                                    t.symbol, snap.mc if snap.hype_usd else 0)
-    pair, hl = await asyncio.gather(ext.pair(address), holders.get(address, t.supply))
-    candles, src = await ext.candles(address, pair, t.decimals, snap.hype_usd, swaps)
+    if slow:
+        pair, hl, (candles, src) = await asyncio.gather(
+            ext.pair(address), holders.get(address, t.supply), ext.candles(address, None, t.decimals, snap.hype_usd, swaps))
+    else:
+        pair, hl, candles, src = await ext.pair(address), None, [], ""
 
     pad = snap.pad or (row or {}).get("pad") or ""
     created = (row or {}).get("ts") or (pair.created if pair else 0)
@@ -154,7 +158,7 @@ async def build_card(update: Update, address: str, make_call: bool):
     if caller:
         lines += [""] + calls.caller_line(caller, snap.mc, e)
     lines.append("")
-    lines += holder_lines(hl, links.addr_link, dev)
+    lines += holder_lines(hl, links.addr_link, dev) if hl is not None else ["⏳ <i>Loading holders and chart…</i>"]
 
     hx = address[2:].lower()
     row2 = []
@@ -185,18 +189,36 @@ async def build_card(update: Update, address: str, make_call: bool):
 
 
 async def send_card(update: Update, address: str, quiet: bool, make_call: bool):
-    text, kb, png = await build_card(update, address, make_call)
+    """Quick card first (price, MC, call), then the same card with holders and chart replaces it."""
+    text, kb, _ = await build_card(update, address, make_call, slow=False)
     msg = update.effective_message
     if not text:
         if not quiet:
             await msg.reply_html(f"❌ No HYPE pool found for <code>{e(address)}</code> on Elysium "
                                  "(Kleos, ElysPump, Boxa, ELYXA, Obol, Montra, Stockium, Uniswap).")
         return
-    if png and visible_len(text) <= 1024:
-        return await msg.reply_photo(png, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb)
-    if png:
-        await msg.reply_photo(png)
-    await msg.reply_html(text, reply_markup=kb, link_preview_options=NO_PREVIEW)
+    first = await msg.reply_html(text, reply_markup=kb, link_preview_options=NO_PREVIEW)
+
+    async def finish():
+        try:
+            text2, kb2, png = await asyncio.wait_for(build_card(update, address, False, slow=True), 120)
+        except Exception as ex:
+            log.info("full card %s: %s", address, ex)
+            return
+        if not text2:
+            return
+        try:
+            if png and visible_len(text2) <= 1024:
+                await msg.reply_photo(png, caption=text2, parse_mode=ParseMode.HTML, reply_markup=kb2)
+                await first.delete()
+            else:
+                await first.edit_text(text2, parse_mode=ParseMode.HTML, reply_markup=kb2,
+                                      link_preview_options=NO_PREVIEW)
+                if png:
+                    await msg.reply_photo(png)
+        except Exception as ex:
+            log.info("full card send %s: %s", address, ex)
+    asyncio.get_running_loop().create_task(finish())
 
 
 async def cmd_scan(update: Update, ctx):

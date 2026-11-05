@@ -163,7 +163,7 @@ class ExtData:
         opts = [(await self.gecko_candles(token, pair), "GeckoTerminal")]
         if swaps is not None:
             try:
-                opts.append((await asyncio.wait_for(swaps.candles(token, decimals, hype_usd), 20), "on-chain swaps"))
+                opts.append((await asyncio.wait_for(swaps.candles(token, decimals, hype_usd), 90), "on-chain swaps"))
             except asyncio.TimeoutError:
                 log.info("swaps %s: timeout", token)
         opts.append((self.local_candles(token), "on-chain"))
