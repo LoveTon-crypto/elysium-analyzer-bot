@@ -44,7 +44,7 @@ store = Store(C.DB_PATH)
 # Two connections to the nodes: commands people send (scan, tops, PnL) never wait behind background work —
 # the deploys feed, tracker, big buys and volume run on their own client capped at BG_RPC_INFLIGHT requests.
 rpc = Rpc(C.RPC_URLS)
-rpc_bg = Rpc(C.RPC_URLS, max_inflight=int(C.env("BG_RPC_INFLIGHT", "6")))
+rpc_bg = Rpc(C.RPC_URLS, max_inflight=int(C.env("BG_RPC_INFLIGHT", "12")))
 VENUES = parse_routers(C.ROUTERS or DEFAULT_VENUES)
 dex = Dex(rpc, VENUES)
 market = Market(rpc, dex)
@@ -578,7 +578,7 @@ async def cmd_deploys(update: Update, ctx):
              f"Last post: {ago(s['last_post']) + ' ago' if s['last_post'] else '—'}",
              f"Big buys (≥{MIN_HYPE:g} HYPE): {big.stats['posted']} posted, last "
              f"{ago(big.stats['last']) + ' ago' if big.stats['last'] else '—'}",
-             f"Tracker: {tracker.last_count} tokens, last run "
+             f"Tracker: {tracker.last_count} tokens, this pass {tracker.done}/{tracker.last_count}, last full pass "
              f"{ago(tracker.last_tick) + ' ago' if tracker.last_tick else '—'}"]
     if s["last_err"]:
         lines.append(f"Last error: <code>{e(s['last_err'])}</code>")

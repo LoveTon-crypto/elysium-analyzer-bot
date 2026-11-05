@@ -28,11 +28,15 @@ class Tracker:
         self.bot_username = ""
         self.last_tick = 0.0
         self.last_count = 0
+        self.done = 0
 
     def candidates(self) -> list[str]:
         now = time.time()
-        rows = self.store.q("SELECT token FROM deploys WHERE posted<>-1 AND pad<>'' AND (ts>? OR last_mc>=?) "
-                            "ORDER BY block DESC LIMIT ?", (now - C.TRACK_DAYS * 86400, C.TRACK_MIN_MC, C.TRACK_MAX))
+        # fresh launches (first 2 h) all; after that only tokens that are alive (MC ≥ TRACK_MIN_MC) within TRACK_DAYS,
+        # or any age if they're big — dead memepad coins aren't re-quoted every minute
+        rows = self.store.q("SELECT token FROM deploys WHERE posted<>-1 AND pad<>'' AND (ts>? OR (ts>? AND last_mc>=?) "
+                            "OR last_mc>=?) ORDER BY block DESC LIMIT ?",
+                            (now - 7200, now - C.TRACK_DAYS * 86400, C.TRACK_MIN_MC, C.TRACK_MIN_MC * 5, C.TRACK_MAX))
         out = [r[0] for r in rows]
         vol = [r[0] for r in self.store.q("SELECT token FROM vol WHERE hour>=? GROUP BY token ORDER BY SUM(hype) DESC "
                                           "LIMIT 80", (int(now // 3600) - 23,))] if self._has_vol() else []
@@ -61,16 +65,21 @@ class Tracker:
 
     async def tick(self):
         tokens = self.candidates()
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(int(C.env("TRACK_CONCURRENCY", "8")))
+        self.last_count, self.done = len(tokens), 0
 
         async def one(tok):
             async with sem:
-                await self.check(tok)
+                try:
+                    await asyncio.wait_for(self.check(tok), 20)
+                except Exception as ex:
+                    log.debug("check %s: %s", tok, ex)
+                self.done += 1
         await asyncio.gather(*(one(t) for t in tokens))
-        self.last_tick, self.last_count = time.time(), len(tokens)
+        self.last_tick = time.time()
 
     async def check(self, token: str):
-        snap = await self.market.try_snap(token)
+        snap = await self.market.try_snap(token, retries=0)
         if not snap or not snap.hype_usd or snap.mc <= 0:
             return
         now, mc = time.time(), snap.mc
