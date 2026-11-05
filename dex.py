@@ -23,6 +23,7 @@ wrapped HYPE (Kleos uses 0x0269…, Uniswap uses 0xba87…), so it is stored per
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import time
 from dataclasses import dataclass, field
@@ -603,8 +604,9 @@ class Dex:
             import logscan
             head = int(await self.rpc.req("eth_blockNumber"), 16)
             logs, _ = await logscan.scan_back(self.rpc, {"address": token, "topics": [TRANSFER_TOPIC]}, head,
-                                              lambda ls: len(ls) >= 4, 1_500_000)
+                                              lambda ls: len(ls) >= 4, 3_000_000)
             hypes = self._hype_addrs()
+            all_ids: set[str] = set()
             for lg in reversed(logs[-10:]):
                 txh = lg["transactionHash"]
                 try:
@@ -616,18 +618,52 @@ class Dex:
                        if x.get("address", "").lower() == manager.lower() and (x.get("topics") or [""])[0] == V4_SWAP_TOPIC}
                 if not ids:
                     continue
+                all_ids.update(ids)
                 for key, hype in self._key_candidates((tx or {}).get("input") or "", token, hypes):
                     if _keccak(key) in ids:
                         res = (key, hype)
                         break
                 if res:
                     break
+            if not res and all_ids:
+                # bought through a router that doesn't spell out the key: read the pool's Initialize event instead
+                res = await self._key_from_initialize(manager, all_ids, token, hypes, head)
         except Exception as ex:
             log.info("v4 key %s: %s", token, ex)
         self._v4keys[token] = (time.monotonic(), res)
         if res:
             log.info("v4 pool of %s: hook 0x%s, %s", token, res[0][-40:], "native HYPE" if int(res[1], 16) == 0 else "WHYPE")
         return res
+
+    async def _key_from_initialize(self, manager: str, ids: set[str], token: str, hypes: set[str], head: int):
+        """PoolManager.Initialize(id, currency0, currency1, fee, tickSpacing, hooks, …) of one of these pools,
+        searched backwards from the head (newest first)."""
+        import logscan
+        from eth_utils import keccak
+        topic = "0x" + keccak(text="Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)").hex().removeprefix("0x")
+        tok = token.lower()
+        for pid in ids:
+            logs, _ = await logscan.scan_back(self.rpc, {"address": manager, "topics": [topic, pid]}, head,
+                                              lambda ls: bool(ls), int(os.getenv("V4_INIT_SEARCH_BLOCKS", "8000000")))
+            for lg in logs:
+                t = lg.get("topics") or []
+                if len(t) < 4:
+                    continue
+                c0, c1 = "0x" + t[2][-40:].lower(), "0x" + t[3][-40:].lower()
+                if tok not in (c0, c1):
+                    continue
+                other = c1 if c0 == tok else c0
+                if other not in hypes:
+                    continue
+                d = lg["data"][2:]
+                key = t[2][2:].rjust(64, "0") + t[3][2:].rjust(64, "0") + d[0:64] + d[64:128] + d[128:192]
+                if _keccak(key) == pid:
+                    return key, other
+        return None
+
+    def v4_searching(self, token: str) -> bool:
+        job = self._v4jobs.get(token.lower())
+        return bool(job and not job.done())
 
     async def _hype_keys(self, token: str) -> list[str]:
         """Candidate v4 PoolKeys (native HYPE, token) for a pair token: Kleos, then ElysPump, then Boxa."""

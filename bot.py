@@ -202,7 +202,10 @@ async def send_card(update: Update, address: str, quiet: bool, make_call: bool):
     text, kb, _ = await build_card(update, address, make_call, slow=False)
     msg = update.effective_message
     if not text:
-        if not quiet:
+        if not quiet and dex.v4_searching(address):
+            await msg.reply_html(f"⏳ Looking for the Uniswap V4 pool of <code>{e(address)}</code> from its trades — "
+                                 "send it again in 20–30 seconds.")
+        elif not quiet:
             await msg.reply_html(f"❌ No HYPE pool found for <code>{e(address)}</code> on Elysium "
                                  "(Kleos, ElysPump, Boxa, ELYXA, Obol, Montra, Stockium, Uniswap).")
         return
