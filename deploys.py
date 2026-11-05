@@ -156,7 +156,7 @@ class DeployFeed:
             if snap or time.monotonic() - t0 >= wait:
                 break
             await asyncio.sleep(3)
-        pad = (snap.pad if snap else None) or C.PAD_FACTORIES.get(to)
+        pad = (snap.pad if snap else None) or C.PAD_FACTORIES.get(to) or self.known_launchers().get(to)
         ok = bool(pad) or C.POST_ALL
         if not pad:
             self.unknown[to or "?"] += 1
@@ -191,6 +191,21 @@ class DeployFeed:
                                             link_preview_options=NO_PREVIEW)
             except Exception as ex:
                 log.info("refresh %s: %s", token, ex)
+
+    def known_launchers(self) -> dict[str, str]:
+        """Launch contracts of the venues dex.py knows (Boxa launcher, pad routers, hooks) → pad label: a launch sent
+        to one of them is a memepad deploy even if its pool doesn't answer a quote yet."""
+        if getattr(self, "_launchers", None) is None:
+            out = {}
+            for v in self.dex.venues:
+                label = links.pad_of(v)
+                if not label:
+                    continue
+                for a in (v.launcher, v.router, v.hook):
+                    if a and a.startswith("0x") and a.lower() not in ("0x1b341fdd55d56f8e08409a2c25ddfad93eb03c1a",):
+                        out.setdefault(a.lower(), label)       # (the shared Uniswap Universal Router isn't a pad)
+            self._launchers = out
+        return self._launchers
 
     async def _seed_v4_key(self, token: str, txh: str):
         """Launchpads that create a Uniswap v4 pool in the launch tx (Ascend, RONS v4 …): the pool's Initialize
