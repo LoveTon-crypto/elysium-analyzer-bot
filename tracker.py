@@ -29,6 +29,8 @@ class Tracker:
         self.last_tick = 0.0
         self.last_count = 0
         self.done = 0
+        self.skip: dict[str, tuple[int, float]] = {}   # token → (misses in a row, don't re-check before ts)
+        self.last_skipped = 0
 
     def candidates(self) -> list[str]:
         now = time.time()
@@ -64,24 +66,39 @@ class Tracker:
             await asyncio.sleep(max(5, C.TRACK_SECONDS - (time.monotonic() - t0)))
 
     async def tick(self):
-        tokens = self.candidates()
-        sem = asyncio.Semaphore(int(C.env("TRACK_CONCURRENCY", "8")))
+        # Tokens without a quotable pool (dead or never-launched Montra/Boxa coins) used to eat a 20 s timeout each,
+        # every pass: with ~400 candidates one pass took 10-15 min and MC/dip alerts came late or not at all.
+        # Now a token that doesn't answer is backed off (1, 2, 4 … 30 min) and each check is capped at TRACK_TIMEOUT.
+        now = time.time()
+        all_tokens = self.candidates()
+        tokens = [t for t in all_tokens if self.skip.get(t, (0, 0))[1] <= now]
+        self.last_skipped = len(all_tokens) - len(tokens)
+        sem = asyncio.Semaphore(int(C.env("TRACK_CONCURRENCY", "16")))
+        limit = float(C.env("TRACK_TIMEOUT", "8"))
         self.last_count, self.done = len(tokens), 0
 
         async def one(tok):
             async with sem:
+                ok = False
                 try:
-                    await asyncio.wait_for(self.check(tok), 20)
+                    ok = await asyncio.wait_for(self.check(tok), limit)
                 except Exception as ex:
                     log.debug("check %s: %s", tok, ex)
+                if ok:
+                    self.skip.pop(tok, None)
+                else:
+                    n = self.skip.get(tok, (0, 0))[0] + 1
+                    self.skip[tok] = (n, time.time() + min(60 * 2 ** (n - 1), 1800))
                 self.done += 1
         await asyncio.gather(*(one(t) for t in tokens))
         self.last_tick = time.time()
+        log.info("tracker pass: %d checked, %d backed off, %.0fs", len(tokens), self.last_skipped, time.time() - now)
 
-    async def check(self, token: str):
+    async def check(self, token: str) -> bool:
+        """False if the token couldn't be quoted (the caller backs it off)."""
         snap = await self.market.try_snap(token, retries=0)
         if not snap or not snap.hype_usd or snap.mc <= 0:
-            return
+            return False
         now, mc = time.time(), snap.mc
         row = self.store.deploy(token)
         if row:
@@ -97,10 +114,11 @@ class Tracker:
         first = token not in self.known
         self.known.add(token)
         if not (snap.pad or token in C.PAD_EXTRA):
-            return
+            return True
         young = row and row["ts"] and now - row["ts"] < 7200
         await self.levels(token, snap, row, silent=first and not young)
         await self.dip(token, snap, row, now)
+        return True
 
     async def levels(self, token, snap, row, silent: bool):
         hit = [lvl for lvl in C.MCAP_LEVELS if snap.mc >= lvl and not self.store.seen(f"mc:{token}:{lvl}")]

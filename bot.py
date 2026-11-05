@@ -578,7 +578,7 @@ async def cmd_deploys(update: Update, ctx):
              f"Last post: {ago(s['last_post']) + ' ago' if s['last_post'] else '—'}",
              f"Big buys (≥{MIN_HYPE:g} HYPE): {big.stats['posted']} posted, last "
              f"{ago(big.stats['last']) + ' ago' if big.stats['last'] else '—'}",
-             f"Tracker: {tracker.last_count} tokens, this pass {tracker.done}/{tracker.last_count}, last full pass "
+             f"Tracker: {tracker.last_count} tokens, this pass {tracker.done}/{tracker.last_count} (backed off {tracker.last_skipped}), last full pass "
              f"{ago(tracker.last_tick) + ' ago' if tracker.last_tick else '—'}"]
     if s["last_err"]:
         lines.append(f"Last error: <code>{e(s['last_err'])}</code>")
