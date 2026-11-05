@@ -61,6 +61,7 @@ PAD_PAGES = {
     "MONTRA": "https://montramarkets.xyz/token/{token}",
     "STOCKIUM": "https://stockium.fun/token/{token}",
     "ASCEND": "https://app.ascendlaunch.xyz/tokens/{token}",
+    "OBOL": "https://obol.world/coin/{token}",
 }
 for _kv in env_list("PAD_PAGES"):
     if "=" in _kv:
