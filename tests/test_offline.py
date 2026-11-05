@@ -380,3 +380,39 @@ def test_volume_book():
 if __name__ == "__main__":
     test_volume_book()
     print("ok test_volume_book")
+
+
+def test_tracker_late_first_quote():
+    """A token older than 2 h whose quotes kept failing (backed off) and then ran: its first good quote in this
+    run used to mark every level silently. With an MC on record, or after a big buy, the level is alerted."""
+    import time as _t
+    store = Store(os.environ["DB_PATH"])
+    tok = "0x" + "c3" * 20
+    store.q("INSERT INTO deploys (token, dev, pad, ts, block, symbol, posted, last_mc) VALUES (?,?,?,?,?,?,?,?)",
+            (tok, "0x" + "d" * 40, "MONTRA", _t.time() - 5 * 3600, 20, "RUN", 1, 4000))
+    posts = []
+
+    async def post(key, text, img, kb):
+        posts.append(key)
+    mk = FakeMarket()
+    mk.mc = 32000
+    tr = Tracker(store, mk, post)
+    asyncio.run(tr.check(tok))
+    assert posts == ["30k"], posts
+
+    tok2 = "0x" + "c4" * 20       # no MC on record, but a big buy just came in
+    store.q("INSERT INTO deploys (token, dev, pad, ts, block, symbol, posted) VALUES (?,?,?,?,?,?,?)",
+            (tok2, "0x" + "d" * 40, "MONTRA", _t.time() - 5 * 3600, 21, "RUN2", 1))
+    posts.clear()
+
+    async def go():
+        tr.nudge(tok2)
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    assert posts == ["30k"], posts
+    assert tok2 in tr.candidates()
+
+
+if __name__ == "__main__":
+    test_tracker_late_first_quote()
+    print("ok test_tracker_late_first_quote")

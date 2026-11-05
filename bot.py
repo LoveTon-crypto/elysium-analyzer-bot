@@ -81,6 +81,7 @@ tracker = Tracker(store, market_bg, post, ext)
 big = BigBuys(store, rpc_bg, dex_bg, market_bg, post)
 book = tops.VolumeBook(store, rpc_bg, big.whype)
 big.book = book
+big.tracker = tracker
 
 
 # ---------------------------------------------------------------- owner

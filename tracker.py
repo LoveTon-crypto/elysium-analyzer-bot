@@ -31,6 +31,7 @@ class Tracker:
         self.done = 0
         self.skip: dict[str, tuple[int, float]] = {}   # token → (misses in a row, don't re-check before ts)
         self.last_skipped = 0
+        self.hot: dict[str, float] = {}    # token → ts of its last big buy: watched for HOT_HOURS, never backed off long
 
     def candidates(self) -> list[str]:
         now = time.time()
@@ -39,13 +40,35 @@ class Tracker:
         rows = self.store.q("SELECT token FROM deploys WHERE posted<>-1 AND pad<>'' AND (ts>? OR (ts>? AND last_mc>=?) "
                             "OR last_mc>=?) ORDER BY block DESC LIMIT ?",
                             (now - 7200, now - C.TRACK_DAYS * 86400, C.TRACK_MIN_MC, C.TRACK_MIN_MC * 5, C.TRACK_MAX))
-        out = [r[0] for r in rows]
+        hot_since = now - float(C.env("HOT_HOURS", "6")) * 3600
+        self.hot = {t: ts for t, ts in self.hot.items() if ts > hot_since}
+        out = list(self.hot)
+        for r in rows:
+            if r[0] not in out:
+                out.append(r[0])
         vol = [r[0] for r in self.store.q("SELECT token FROM vol WHERE hour>=? GROUP BY token ORDER BY SUM(hype) DESC "
                                           "LIMIT 80", (int(now // 3600) - 23,))] if self._has_vol() else []
         for t in calls.recent_tokens(self.store.db, 30) + C.PAD_EXTRA + (self.ext.watched() if self.ext else []) + vol:
             if t not in out:
                 out.append(t)
         return out
+
+    def is_hot(self, token: str) -> bool:
+        return token in self.hot
+
+    def nudge(self, token: str):
+        """A big buy just landed on this token: watch it, drop any back-off and check it right now
+        (without the per-check cap — a hot token is worth the wait)."""
+        token = token.lower()
+        self.hot[token] = time.time()
+        self.skip.pop(token, None)
+
+        async def go():
+            try:
+                await asyncio.wait_for(self.check(token), 40)
+            except Exception as ex:
+                log.info("nudge %s: %s", token, ex)
+        asyncio.get_running_loop().create_task(go())
 
     def _has_vol(self) -> bool:
         return bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vol'"))
@@ -77,18 +100,22 @@ class Tracker:
         limit = float(C.env("TRACK_TIMEOUT", "8"))
         self.last_count, self.done = len(tokens), 0
 
+        young_since = now - 7200
+        young = {r[0] for r in self.store.q("SELECT token FROM deploys WHERE ts>?", (young_since,))}
+
         async def one(tok):
             async with sem:
                 ok = False
+                fresh = tok in young or tok in self.hot     # a slow quote on a live launch isn't a dead token
                 try:
-                    ok = await asyncio.wait_for(self.check(tok), limit)
+                    ok = await asyncio.wait_for(self.check(tok), limit * 2 if fresh else limit)
                 except Exception as ex:
                     log.debug("check %s: %s", tok, ex)
                 if ok:
                     self.skip.pop(tok, None)
                 else:
                     n = self.skip.get(tok, (0, 0))[0] + 1
-                    self.skip[tok] = (n, time.time() + min(60 * 2 ** (n - 1), 1800))
+                    self.skip[tok] = (n, time.time() + (0 if fresh else min(60 * 2 ** (n - 1), 1800)))
                 self.done += 1
         await asyncio.gather(*(one(t) for t in tokens))
         self.last_tick = time.time()
@@ -101,6 +128,7 @@ class Tracker:
             return False
         now, mc = time.time(), snap.mc
         row = self.store.deploy(token)
+        prev_mc = (row or {}).get("last_mc") or 0
         if row:
             self.store.q("UPDATE deploys SET last_mc=?, ath=MAX(ath, ?) WHERE token=?",
                          (mc, mc if (row["ts"] or 0) > now - C.ATH_DAYS * 86400 else 0, token))
@@ -116,7 +144,10 @@ class Tracker:
         if not (snap.pad or token in C.PAD_EXTRA):
             return True
         young = row and row["ts"] and now - row["ts"] < 7200
-        await self.levels(token, snap, row, silent=first and not young)
+        # Silent only for a token we know nothing about yet (first look, old, no MC on record, no big buy): its
+        # levels were passed before we watched it. "First look" used to mean first *successful* quote in this run,
+        # so a token whose quotes kept timing out (backed off) and then ran got all its levels marked silently.
+        await self.levels(token, snap, row, silent=first and not young and not prev_mc and token not in self.hot)
         await self.dip(token, snap, row, now)
         return True
 

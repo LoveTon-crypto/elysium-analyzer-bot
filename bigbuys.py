@@ -39,6 +39,7 @@ class BigBuys:
         self.sem = asyncio.Semaphore(6)
         self.bot_username = ""
         self.stats = {"posted": 0, "checked": 0, "last": 0.0}
+        self.tracker = None       # tracker.Tracker: a big buy puts the token on its hot list
         self.book = None          # tops.VolumeBook: every swap is also booked as volume
 
     async def run(self, app):
@@ -141,6 +142,8 @@ class BigBuys:
         extra = [f'👤 Buyer <a href="{links.addr_link(buyer)}">{links.short(buyer)}</a> · got {held_pct:.2f}% of supply',
                  f'🔗 <a href="{C.EXPLORER}/tx/{txh}">Transaction</a>']
         text = "\n".join(head + scanner.card_lines(snap, row, extra))
+        if self.tracker is not None:
+            self.tracker.nudge(token)
         await self.post("bigbuy", text, None, scanner.alert_keyboard(token, self.bot_username, snap.pad or ""))
         self.stats["posted"] += 1
         self.stats["last"] = time.time()
