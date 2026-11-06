@@ -34,6 +34,9 @@ class Tracker:
         self.no_price = False
         self.last_res: dict = {}
         self.hot: dict[str, float] = {}    # token → ts of its last big buy: watched for HOT_HOURS, never backed off long
+        # MC alerts: what happened to them (shown in /deploys) — they used to vanish without a trace
+        self.mc_stats = {"sent": 0, "failed": 0, "silent": 0, "unbound": 0, "last": 0.0, "last_err": ""}
+        self._mc_fail: dict[str, int] = {}  # token:level → failed posts (retried next pass, up to 5 times)
 
     def candidates(self) -> list[str]:
         now = time.time()
@@ -176,19 +179,50 @@ class Tracker:
 
     async def levels(self, token, snap, row, silent: bool):
         hit = [lvl for lvl in C.MCAP_LEVELS if snap.mc >= lvl and not self.store.seen(f"mc:{token}:{lvl}")]
-        for lvl in hit:
-            self.store.mark(f"mc:{token}:{lvl}")
-        if not hit or silent:
+        if not hit:
             return
-        lvl = max(hit)
+        if silent:   # levels passed before we watched the token: remember them without posting
+            for lvl in hit:
+                self.store.mark(f"mc:{token}:{lvl}")
+            self.mc_stats["silent"] += 1
+            log.info("MC levels %s of %s marked silently (first look, old token)", hit, token)
+            return
+        # the highest level passed that has somewhere to go: a token that jumped 10K → 35K between checks used to
+        # be posted only to '30k' — with just 10k/20k bound, every level was dropped without a word
+        bound = [x for x in hit if self.store.topic(level_key(x))]
+        if not bound:
+            # nowhere to post: mark, so binding the topic later doesn't flood old alerts — but say so
+            for x in hit:
+                self.store.mark(f"mc:{token}:{x}")
+            self.mc_stats["unbound"] += 1
+            log.warning("MC alert %s (levels %s) not sent: no MC topic bound (/settopic mc …)", token, hit)
+            return
+        lvl = max(bound)
+        key = level_key(lvl)
         age = ""
         if row and row.get("ts"):
             from deploys import ago
             age = f"🕒 Age: {ago(row['ts'])}"
-        lines = [f"🎯 <b>${level_key(lvl).upper()} MARKET CAP</b>", ""] + scanner.card_lines(snap, row, [age] if age else [])
-        await self.post(level_key(lvl), "\n".join(lines), None,
-                        scanner.alert_keyboard(token, self.bot_username, snap.pad))
-        log.info("MC %s alert %s (%.0f)", level_key(lvl), token, snap.mc)
+        lines = [f"🎯 <b>${key.upper()} MARKET CAP</b>", ""] + scanner.card_lines(snap, row, [age] if age else [])
+        msg = await self.post(key, "\n".join(lines), None, scanner.alert_keyboard(token, self.bot_username, snap.pad))
+        fk = f"{token}:{lvl}"
+        if msg is None:
+            # the post failed (no rights in the channel, Telegram error …): the level stays unmarked and is retried
+            n = self._mc_fail.get(fk, 0) + 1
+            self._mc_fail[fk] = n
+            self.mc_stats["failed"] += 1
+            why = getattr(self.post, "last_err", "") or "post failed"
+            self.mc_stats["last_err"] = f"{key} {token[:10]} (try {n}): {why}"
+            log.warning("MC %s alert %s: post failed (try %d)", key, token, n)
+            if n < 5:
+                return
+        self._mc_fail.pop(fk, None)
+        for x in hit:
+            self.store.mark(f"mc:{token}:{x}")
+        if msg is not None:
+            self.mc_stats["sent"] += 1
+            self.mc_stats["last"] = time.time()
+            log.info("MC %s alert %s (%.0f)", key, token, snap.mc)
 
     async def dip(self, token, snap, row, now):
         # v4 pools and pad curves don't report liquidity (0): filter tiny tokens by market cap instead

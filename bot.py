@@ -61,6 +61,7 @@ APP: Application | None = None
 
 
 async def post(topic_key: str, text: str, image=None, kb=None):
+    post.last_err = ""
     t = store.topic(topic_key)
     if not t or not APP:
         return None
@@ -74,6 +75,7 @@ async def post(topic_key: str, text: str, image=None, kb=None):
         return await APP.bot.send_message(text=text, link_preview_options=NO_PREVIEW, **kw)
     except Exception as ex:
         log.warning("can't post to %s: %s", topic_key, ex)
+        post.last_err = f"{type(ex).__name__}: {ex}"[:200]
         return None
 
 
@@ -600,6 +602,14 @@ async def cmd_deploys(update: Update, ctx):
     r = tracker.last_res
     if r:
         lines.append(f"Last pass: ok {r['ok']} · no pool {r['nopool']} · timeout {r['timeout']} · err {r['err']}")
+    m = tracker.mc_stats
+    bound = {k: store.topic(k) for k in (level_key(v) for v in C.MCAP_LEVELS)}
+    lines.append(f"MC alerts: sent {m['sent']} (last {ago(m['last']) + ' ago' if m['last'] else '—'}) · failed "
+                 f"{m['failed']} · not bound {m['unbound']} · silent {m['silent']}")
+    lines.append("MC topics: " + " · ".join(f"{k} {'→ ' + str(t[0]) + (f'/{t[1]}' if t[1] else '') if t else '❌'}"
+                                            for k, t in bound.items()))
+    if m["last_err"]:
+        lines.append(f"MC last error: <code>{e(m['last_err'])}</code>")
     u = usd_status()
     lines.append(f"HYPE/USD: {u['v']:.3f} via {u['src'] or '—'}" +
                  (f" · ⚠️ {u['fails']} failed rounds: <code>{e(u['err'][:300])}</code>" if u["fails"] else ""))
