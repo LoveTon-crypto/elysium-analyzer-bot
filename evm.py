@@ -180,6 +180,11 @@ class Rpc:
         fresh = sorted((dt, u) for u, h, dt in res if h >= top - max_lag)
         best = fresh[0][1]
         i = self.urls.index(best)
+        # sticky: stay on the current node while it's fresh and not clearly slower — the bot used to hop to
+        # another node every probe (≈8 s) over a few ms of noise, losing its warm connections each time
+        cur = next(((dt, u) for dt, u in fresh if u == self.urls[self._i]), None)
+        if cur and cur[0] <= fresh[0][0] * 1.5 + 0.05:
+            return
         if i != self._i:
             log.info("rpc: switching to %s (top block %s)", best, top)
             self._i = i
