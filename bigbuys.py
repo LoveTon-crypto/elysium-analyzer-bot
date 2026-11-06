@@ -19,7 +19,7 @@ from swaps import TRANSFER, V2_SWAP, V3_SWAP, V4_SWAP, TOKEN0, TOKEN1
 
 log = logging.getLogger("bigbuys")
 
-MIN_HYPE = float(C.env("BIGBUY_HYPE", "10"))
+MIN_HYPE = float(C.env("BIGBUY_HYPE", "15"))
 POLL = float(C.env("BIGBUY_POLL", "3"))
 CANON_WHYPE = "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
 

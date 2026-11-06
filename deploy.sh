@@ -8,6 +8,8 @@ if [ ! -x venv/bin/python ]; then
   python3 -m venv venv
 fi
 [ -f .env ] || { cp .env.example .env; echo "⚠️  Created .env — put BOT_TOKEN in it: nano /root/elysium-analyzer-bot/.env"; }
+# Big buys threshold moved 10 → 15 HYPE (Nov 2026): .env files created from the old .env.example still say 10
+grep -q '^BIGBUY_HYPE=10$' .env && sed -i 's/^BIGBUY_HYPE=10$/BIGBUY_HYPE=15/' .env && echo ">>> BIGBUY_HYPE: 10 → 15"
 echo ">>> Installing libraries..."
 apt-get install -y -qq libcairo2 >/dev/null 2>&1 || true   # SVG token pictures
 venv/bin/pip install -q --upgrade pip
