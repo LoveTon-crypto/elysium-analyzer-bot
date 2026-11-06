@@ -177,6 +177,16 @@ class Rpc:
         top = max(h for _, h, _ in res)
         if top < 0:
             return
+        # Elysium makes ~12 blocks/s, so "10 blocks behind" was under a second — probe jitter alone dropped the
+        # current node every round. Allow LAG_SEC seconds' worth of blocks, measured from the probes themselves.
+        now = time.monotonic()
+        prev = getattr(self, "_top_seen", None)
+        if prev and now > prev[0] and top > prev[1]:
+            rate = (top - prev[1]) / (now - prev[0])
+            self._rate = rate if not getattr(self, "_rate", 0) else self._rate * 0.7 + rate * 0.3
+        self._top_seen = (now, top)
+        import os
+        max_lag = max(max_lag, int(getattr(self, "_rate", 0) * float(os.getenv("RPC_LAG_SEC", "3"))))
         fresh = sorted((dt, u) for u, h, dt in res if h >= top - max_lag)
         best = fresh[0][1]
         i = self.urls.index(best)
