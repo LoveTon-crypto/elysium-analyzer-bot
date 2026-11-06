@@ -31,6 +31,7 @@ class Tracker:
         self.done = 0
         self.skip: dict[str, tuple[int, float]] = {}   # token → (misses in a row, don't re-check before ts)
         self.last_skipped = 0
+        self.no_price = False
         self.hot: dict[str, float] = {}    # token → ts of its last big buy: watched for HOT_HOURS, never backed off long
 
     def candidates(self) -> list[str]:
@@ -93,6 +94,15 @@ class Tracker:
         # every pass: with ~400 candidates one pass took 10-15 min and MC/dip alerts came late or not at all.
         # Now a token that doesn't answer is backed off (1, 2, 4 … 30 min) and each check is capped at TRACK_TIMEOUT.
         now = time.time()
+        # No HYPE/USD price at all = MC can't be computed for anything: skip the pass instead of backing off every
+        # token (that silenced all MC/dip alerts for hours when the price API didn't answer from the server).
+        if not await self.market.hype_usd():
+            self.no_price = True
+            log.warning("tracker: no HYPE/USD price, pass skipped")
+            return
+        if self.no_price:                      # price is back: tokens backed off meanwhile get checked right away
+            self.no_price = False
+            self.skip.clear()
         all_tokens = self.candidates()
         tokens = [t for t in all_tokens if self.skip.get(t, (0, 0))[1] <= now]
         self.last_skipped = len(all_tokens) - len(tokens)

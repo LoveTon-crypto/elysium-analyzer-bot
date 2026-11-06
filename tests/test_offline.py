@@ -136,6 +136,9 @@ class FakeDex:
 class FakeMarket:
     mc = 5000.0
 
+    async def hype_usd(self):
+        return 30.0
+
     async def try_snap(self, a, retries=1):
         r = Route(Venue("kleos", "Kleos", "0x" + "1" * 40), probe_out=1, liquidity=10 ** 19)
         price = self.mc / 30 / 1e9
@@ -416,3 +419,30 @@ def test_tracker_late_first_quote():
 if __name__ == "__main__":
     test_tracker_late_first_quote()
     print("ok test_tracker_late_first_quote")
+
+
+def test_hype_usd_fallback(tmp_path, monkeypatch):
+    """Hyperliquid down → next source; all down → last good price kept, not 0."""
+    import market as M
+    monkeypatch.setattr(M, "_PRICE_FILE", str(tmp_path / "p"))
+    monkeypatch.setattr(M, "_USD", {"v": 0.0, "at": 0.0, "tried": 0.0, "src": "", "fails": 0, "err": ""})
+
+    class Resp:
+        def __init__(self, j): self.j = j
+        def raise_for_status(self): pass
+        def json(self): return self.j
+
+    class Http:
+        down = {"hl"}
+        async def post(self, url, **kw):
+            if "hl" in self.down: raise TimeoutError()
+            return Resp({"HYPE": "40"})
+        async def get(self, url, **kw):
+            if "all" in self.down: raise TimeoutError()
+            if "coingecko" in url: return Resp({"hyperliquid": {"usd": 41.5}})
+            raise TimeoutError()
+    h = Http()
+    assert asyncio.run(M.fetch_hype_usd(h)) == 41.5 and M._USD["src"] == "coingecko"
+    h.down = {"hl", "all"}
+    M._USD["at"] = 0.0; M._USD["tried"] = 0.0
+    assert asyncio.run(M.fetch_hype_usd(h)) == 41.5 and M._USD["fails"] == 1

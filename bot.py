@@ -26,7 +26,7 @@ from extdata import ExtData, render_chart
 from holders import HolderScanner, holder_lines
 from swaps import SwapHistory
 from links import e, usd
-from market import Market
+from market import Market, usd_status
 from store import Store
 from tracker import Tracker, level_key
 
@@ -597,6 +597,9 @@ async def cmd_deploys(update: Update, ctx):
              f"{ago(big.stats['last']) + ' ago' if big.stats['last'] else '—'}",
              f"Tracker: {tracker.last_count} tokens, this pass {tracker.done}/{tracker.last_count} (backed off {tracker.last_skipped}), last full pass "
              f"{ago(tracker.last_tick) + ' ago' if tracker.last_tick else '—'}"]
+    u = usd_status()
+    lines.append(f"HYPE/USD: {u['v']:.3f} via {u['src'] or '—'}" +
+                 (f" · ⚠️ {u['fails']} failed rounds: <code>{e(u['err'][:300])}</code>" if u["fails"] else ""))
     if s["last_err"]:
         lines.append(f"Last error: <code>{e(s['last_err'])}</code>")
     by_pad = store.q("SELECT pad, COUNT(*) FROM deploys WHERE posted=1 GROUP BY pad ORDER BY 2 DESC")

@@ -4,3 +4,4 @@ __pycache__/
 *.db
 *.db-*
 v4keys.json*
+.hype_usd
