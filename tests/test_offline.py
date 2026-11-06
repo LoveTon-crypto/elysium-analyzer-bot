@@ -139,7 +139,8 @@ class FakeMarket:
     async def hype_usd(self):
         return 30.0
 
-    async def try_snap(self, a, retries=1):
+    async def try_snap(self, a, retries=1, venue=""):
+        self.venues = getattr(self, "venues", []) + [venue]
         r = Route(Venue("kleos", "Kleos", "0x" + "1" * 40), probe_out=1, liquidity=10 ** 19)
         price = self.mc / 30 / 1e9
         return Snap(TOK, r, price, price * 1e9, 10, 30.0, "KLEOS")
@@ -160,6 +161,8 @@ class FakeBot:
 
 def test_deploy_and_tracker():
     store = Store(os.environ["DB_PATH"])
+    for k in ("10k", "20k", "30k", "50k", "100k"):   # MC alerts post only to bound topics
+        store.set_topic(k, -100, 1)
     feed = DeployFeed(store, FakeRpc(), FakeDex(), FakeMarket())
     store.kv_set("deploy_channel", "-100123")
     bot = FakeBot()
@@ -185,6 +188,7 @@ def test_deploy_and_tracker():
 
     async def post(key, text, img, kb):
         posts.append((key, text))
+        return True                    # a sent message (None = failed post, retried)
     mk = FakeMarket()
     tr = Tracker(store, mk, post)
 
@@ -390,6 +394,8 @@ def test_tracker_late_first_quote():
     run used to mark every level silently. With an MC on record, or after a big buy, the level is alerted."""
     import time as _t
     store = Store(os.environ["DB_PATH"])
+    for k in ("10k", "20k", "30k", "50k", "100k"):   # MC alerts post only to bound topics
+        store.set_topic(k, -100, 1)
     tok = "0x" + "c3" * 20
     store.q("INSERT INTO deploys (token, dev, pad, ts, block, symbol, posted, last_mc) VALUES (?,?,?,?,?,?,?,?)",
             (tok, "0x" + "d" * 40, "MONTRA", _t.time() - 5 * 3600, 20, "RUN", 1, 4000))
@@ -397,6 +403,7 @@ def test_tracker_late_first_quote():
 
     async def post(key, text, img, kb):
         posts.append(key)
+        return True
     mk = FakeMarket()
     mk.mc = 32000
     tr = Tracker(store, mk, post)
@@ -446,3 +453,21 @@ def test_hype_usd_fallback(tmp_path, monkeypatch):
     h.down = {"hl", "all"}
     M._USD["at"] = -1e9; M._USD["tried"] = -1e9
     assert asyncio.run(M.fetch_hype_usd(h)) == 41.5 and M._USD["fails"] == 1
+
+
+def test_tracker_pad_venue_hint():
+    """A deploy row with no venue is quoted on its pad's usual venue, not by a full search of every venue."""
+    import time as _t
+    store = Store(os.environ["DB_PATH"])
+    known, blank = "0x" + "e5" * 20, "0x" + "e6" * 20
+    store.q("INSERT INTO deploys (token, dev, pad, venue, ts, block, symbol, posted) VALUES (?,?,?,?,?,?,?,?)",
+            (known, "0x" + "d" * 40, "OBOL", "Obol", _t.time() - 600, 30, "K", 1))
+    store.q("INSERT INTO deploys (token, dev, pad, venue, ts, block, symbol, posted) VALUES (?,?,?,?,?,?,?,?)",
+            (blank, "0x" + "d" * 40, "OBOL", "", _t.time() - 600, 31, "B", 1))
+    mk = FakeMarket()
+
+    async def post(*a):
+        pass
+    tr = Tracker(store, mk, post)
+    asyncio.run(tr.tick())
+    assert mk.venues.count("Obol") == 2 and "" not in mk.venues, mk.venues

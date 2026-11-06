@@ -114,6 +114,14 @@ class Tracker:
         limit = float(C.env("TRACK_TIMEOUT", "12"))
         self.last_count, self.done = len(tokens), 0
 
+        # pad → venue its tokens usually trade on (most common recorded venue per pad). 3000+ deploys rows have no
+        # venue (no pool yet when the deploy was seen): without a hint each check searched all ~25 venues, waited
+        # for RPC slots shared with big buys, and ~300 of ~340 checks per pass timed out.
+        self.pad_venue = {}
+        for pad, venue, _n in self.store.q("SELECT pad, venue, COUNT(*) FROM deploys WHERE pad<>'' AND venue<>'' "
+                                           "GROUP BY pad, venue ORDER BY 3 DESC"):
+            self.pad_venue.setdefault(pad, venue)
+
         young_since = now - 7200
         young = {r[0] for r in self.store.q("SELECT token FROM deploys WHERE ts>?", (young_since,))}
 
@@ -151,7 +159,9 @@ class Tracker:
         """False if the token couldn't be quoted (the caller backs it off)."""
         row = self.store.deploy(token)
         # the venue the token was found on before: checked alone first (a full search costs dozens of RPC calls)
-        snap = await self.market.try_snap(token, retries=0, venue=(row or {}).get("venue") or "")
+        # no venue on record: the usual venue of the token's pad (Montra → Montra …); a miss still falls back to the full search
+        venue = (row or {}).get("venue") or getattr(self, "pad_venue", {}).get((row or {}).get("pad") or "", "")
+        snap = await self.market.try_snap(token, retries=0, venue=venue)
         if not snap or not snap.hype_usd or snap.mc <= 0:
             return False
         now, mc = time.time(), snap.mc
