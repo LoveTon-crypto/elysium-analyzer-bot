@@ -12,7 +12,7 @@ START_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # Telegram ?start= limit
 
 # Venue (from dex.py) → launchpad label. Venues not listed here are plain DEX pools, not memepad launches.
 _PAD_BY_NAME = (("Kleos", "KLEOS"), ("ElysPump", "ELYSPUMP"), ("Boxa", "BOXA"), ("ELYXA", "ELYXA"),
-                ("Obol", "OBOL"), ("Montra", "MONTRA"), ("Stockium", "STOCKIUM"))
+                ("Obol", "OBOL"), ("Montra", "MONTRA"), ("Stockium", "STOCKIUM"), ("Home Of Elysium", "HOME"))
 PAD_KINDS = {"kleos", "kleos4", "kpair", "elyxa", "obol", "boxa4", "ep4"}   # launch curves / launch hooks
 NOT_PAD = {"KleosSwap", "Boxa V3", "Boxa Stocks", "Uniswap V3", "Uniswap V2", "ElysPump V2"}
 
@@ -31,7 +31,8 @@ def pad_of(venue) -> str | None:
 
 # v4 launchpads recognised by the hook of their pools (generic 'Uniswap V4' venue)
 V4_HOOKS = (("e0de", "a8ec", "ASCEND"), ("d80e67b5", "e8ec", "RONS"), ("6b1216a4", "f8ec", "MONTRA"),
-            ("e11cafa5", "20cc", "ELYSPUMP"), ("bacf71bf", "e0cc", "ELYSPUMP"))
+            ("e11cafa5", "20cc", "ELYSPUMP"), ("bacf71bf", "e0cc", "ELYSPUMP"),
+            ("53b4794c", "f2bc", "HOME"))      # Home Of Elysium PositionManager (homeofelysium.xyz)
 
 
 def pad_of_route(route) -> str | None:
@@ -51,7 +52,7 @@ def pad_of_route(route) -> str | None:
 
 def pad_title(label: str) -> str:
     return {"KLEOS": "Kleos", "ELYSPUMP": "ElysPump", "BOXA": "Boxa", "OBOL": "Obol", "MONTRA": "Montra",
-            "STOCKIUM": "Stockium", "ELYXA": "ELYXA", "ASCEND": "Ascend", "RONS": "RONS",
+            "STOCKIUM": "Stockium", "ELYXA": "ELYXA", "ASCEND": "Ascend", "RONS": "RONS", "HOME": "Home Of Elysium",
             "UNIV4": "Uniswap V4"}.get(label, label.title())
 
 

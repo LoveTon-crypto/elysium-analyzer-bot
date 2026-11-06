@@ -217,7 +217,7 @@ async def send_card(update: Update, address: str, quiet: bool, make_call: bool):
                                  "send it again in 20–30 seconds.")
         elif not quiet:
             await msg.reply_html(f"❌ No HYPE pool found for <code>{e(address)}</code> on Elysium "
-                                 "(Kleos, ElysPump, Boxa, ELYXA, Obol, Montra, Stockium, Uniswap).")
+                                 "(Kleos, ElysPump, Boxa, ELYXA, Obol, Montra, Stockium, Home Of Elysium, Uniswap).")
         return
     first = await msg.reply_html(text, reply_markup=kb, link_preview_options=NO_PREVIEW)
 

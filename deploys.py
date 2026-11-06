@@ -34,6 +34,7 @@ log = logging.getLogger("deploys")
 BUILTIN_FACTORIES = {
     "0x38d3ef3a06d18fa3286fb5deafe611be725fcd15": "MONTRA",    # Montra factory (montramarkets.xyz/docs/contracts)
     "0x00d4c904f74f74c6920c95e3ee807ab3c52dd205": "BOXA",      # Boxa launcher
+    "0x53b4794cc8fa2b8232e4656850c857400160f2bc": "HOME",      # Home Of Elysium PositionManager.launch()
 }
 RECHECK_MIN = 20       # tokens without a pool yet are re-checked for this long, then given up
 

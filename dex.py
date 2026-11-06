@@ -16,6 +16,7 @@ Venue kinds (all checked on mainnet, chain 99901, 2026-11-03):
           in one tx. token.pairToken() (0x999b93af) names the pair; the first hop's v4 key is found on Kleos,
           ElysPump or Boxa. buy(token, key, minOut, to, dl) payable · sell(token, key, amountIn, minOut, to, dl);
           quotes return (pair amount, final amount).
+  Home Of Elysium (homeofelysium.xyz) is an ep4 venue too: tickSpacing 60 and its own Universal Router/Permit2.
   v3 venues without a quoter (StockiumSwap, Uniswap V3) quote by simulating the router call (eth_call).
 Each token trades on the venue that gives the most tokens for a small probe buy. Every venue has its own
 wrapped HYPE (Kleos uses 0x0269…, Uniswap uses 0xba87…), so it is stored per venue.
@@ -100,6 +101,11 @@ DEFAULT_VENUES = ("kleos:Kleos=0x15c7ee481ce8c57461bc8620adc5fb784374c240,"
                   # the canonical PoolManager, traded through Universal Router 0x1b34 / V4 quoter 0x379f
                   "ep4:Montra=0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec/0x1b341fdd55d56f8e08409a2c25ddfad93eb03c1a"
                   "/0x379f556c5a748bd7cc9baf0f7a344094ac1814f5/8388608,"
+                  # Home Of Elysium (homeofelysium.xyz/docs#contracts): Uniswap v4 on its own PoolManager 0xa833…,
+                  # key (HYPE, token, fee 0, tickSpacing 60, hook = PositionManager); fees taken by the hook.
+                  # Own Universal Router / V4Quoter / Permit2
+                  "ep4:Home Of Elysium=0x53b4794cc8fa2b8232e4656850c857400160f2bc/0x2fca41659818c534f4ec02aad8a102c0e7597efe"
+                  "/0xa500e08a1553f94da9d24d450c17452e5c88987c/0/60/0x61478f6c93aaecacd51396c1f1d76aca6881812c,"
                   # Obol: current v4 pad first, then older pads whose coins still trade (obol.world /api/coins)
                   "obol:Obol=0x4de07902f28d00736e29aa5739dea2d4ce98aacc,"
                   "obol:Obol 2=0xfee823be55ee12b8c3a76aff0bd69470afaf2348,"
@@ -126,7 +132,10 @@ DEFAULT_VENUES = ("kleos:Kleos=0x15c7ee481ce8c57461bc8620adc5fb784374c240,"
                   "v2:ElysPump V2=0x3320b5685c1c4a0d2a5b0ca30dcee095142bf076,"
                   # any other pool on the canonical v4 PoolManager (Ascend, RONS v4 …): key found from the token's trades
                   "v4any:Uniswap V4=0xe2e105d3f7209a9da11f83ccf3e7398a753823f1/0x1b341fdd55d56f8e08409a2c25ddfad93eb03c1a"
-                  "/0x379f556c5a748bd7cc9baf0f7a344094ac1814f5")
+                  "/0x379f556c5a748bd7cc9baf0f7a344094ac1814f5,"
+                  # Home Of Elysium's own v4 PoolManager: finds the key from trades if the fixed ep4 key misses
+                  "v4any:Home Of Elysium v4=0xa833cb52e8bec37cca299aaae2ce086fe3446d5e/0x2fca41659818c534f4ec02aad8a102c0e7597efe"
+                  "/0xa500e08a1553f94da9d24d450c17452e5c88987c/0x61478f6c93aaecacd51396c1f1d76aca6881812c")
 
 
 class NoPool(RuntimeError):
@@ -153,6 +162,8 @@ class Venue:
     launcher: str = ""           # boxa4
     pool_fee: int = 0            # ep4: PoolKey fee (0x800000 = dynamic fee set by the hook)
     hook: str = ""               # ep4
+    tick_spacing: int = 0        # ep4: PoolKey tickSpacing (0 = EP_TICK_SPACING)
+    permit2: str = ""            # ep4/v4any: Permit2 of this venue's Universal Router ("" = canonical)
 
 
 @dataclass
@@ -183,9 +194,20 @@ def parse_routers(spec: str) -> list[Venue]:
             kind = kind.strip().lower()
         name, _, addrs = part.rpartition("=")
         a = [x.strip() for x in addrs.split("/")]
-        pool_fee = 0
-        if kind == "ep4" and len(a) == 4 and a[3].isdigit():
-            pool_fee = int(a.pop())
+        pool_fee, spacing, permit2 = 0, 0, ""
+        if kind == "ep4" and len(a) > 3:  # optional tail: /fee[/tickSpacing[/permit2]]
+            tail = a[3:]
+            a = a[:3]
+            if tail and tail[-1].startswith("0x"):
+                permit2 = tail.pop()
+            if not all(x.isdigit() for x in tail) or len(tail) > 2 or (permit2 and not ADDR_RE.fullmatch(permit2)):
+                raise ValueError(f"bad venue {part!r}")
+            if tail:
+                pool_fee = int(tail[0])
+            if len(tail) > 1:
+                spacing = int(tail[1])
+        if kind == "v4any" and len(a) == 4:  # optional 4th: the venue's own Permit2
+            permit2 = a.pop()
         if kind not in ("v2", "v3", "kleos", "kleos4", "elyxa", "obol", "kpair", "boxa4", "ep4", "v4any") or not all(ADDR_RE.fullmatch(x) or x == "-" for x in a):
             raise ValueError(f"bad venue {part!r}")
         name = name.strip() or f"DEX{i + 1}"
@@ -196,11 +218,14 @@ def parse_routers(spec: str) -> list[Venue]:
             v = Venue(kind, name, a[1], quoter=q(a[2]))
             if kind in ("v3", "v4any"):
                 v.factory = a[0]          # v4any: the PoolManager
+                v.permit2 = permit2
             elif kind == "boxa4":
                 v.launcher = a[0]
             else:
                 v.hook = a[0]
                 v.pool_fee = pool_fee
+                v.tick_spacing = spacing
+                v.permit2 = permit2
             out.append(v)
         else:
             out.append(Venue(kind, name, a[0]))
@@ -226,10 +251,10 @@ def bl(h: str) -> str:
     return _word(len(h) // 2) + h + "0" * ((64 - len(h) % 64) % 64)
 
 
-def ep_key(token: str, hook: str, fee: int = 0) -> str:
-    """v4 PoolKey of a launchpad pool: (native HYPE, token, fee, tickSpacing 200, hook). ElysPump: fee 0;
-    Montra: 0x800000 (dynamic fee)."""
-    return _word(0) + _addr(token) + _word(fee) + _word(EP_TICK_SPACING) + _addr(hook)
+def ep_key(token: str, hook: str, fee: int = 0, spacing: int = 0) -> str:
+    """v4 PoolKey of a launchpad pool: (native HYPE, token, fee, tickSpacing, hook). ElysPump: fee 0, spacing 200;
+    Montra: 0x800000 (dynamic fee); Home Of Elysium: fee 0, spacing 60."""
+    return _word(0) + _addr(token) + _word(fee) + _word(spacing or EP_TICK_SPACING) + _addr(hook)
 
 
 def v4_quote_data(key: str, buy: bool, amount: int) -> str:
@@ -315,7 +340,8 @@ def ur_v4_any(key: str, token: str, hype: str, buy: bool, amount: int, min_out: 
 class Dex:
     def __init__(self, rpc: Rpc, venues: list[Venue]):
         self.rpc, self.venues = rpc, venues
-        self._venue_cache: dict[str, tuple[float, str, int, str, str]] = {}  # token → (ts, venue name, fee, pool, key)
+        self._venue_cache: dict[str, tuple[float, str, int, str, str, str]] = {}  # token → (ts, venue, fee, pool, key, via)
+        self._approve_jobs: dict[tuple[str, str], asyncio.Task] = {}  # (wallet, token) → background approve
         self._meta: dict[str, tuple[str, str, int]] = {}      # token → (name, symbol, decimals)
         self._supply: dict[str, tuple[float, int]] = {}       # token → (ts, total supply)
         self._v4keys: dict[str, tuple[float, tuple | None]] = {}   # token → (ts, (key, hype currency) or None)
@@ -537,7 +563,7 @@ class Dex:
                     if len(key) != 320 or int(key[64:128], 16) != int(token, 16):
                         return []
                 else:
-                    key = ep_key(token, v.hook, v.pool_fee)
+                    key = ep_key(token, v.hook, v.pool_fee, v.tick_spacing)
                 r = Route(v, key=key)
                 r.probe_out = await self.quote_buy(r, token, PROBE)
                 return [r] if r.probe_out else []
@@ -699,7 +725,7 @@ class Dex:
             keys.append(_word(0) + _addr(token) + _word(fee) + _word(spacing) + _word(0))
         for v in self.venues:
             if v.kind == "ep4":
-                keys.append(ep_key(token, v.hook, v.pool_fee))
+                keys.append(ep_key(token, v.hook, v.pool_fee, v.tick_spacing))
             elif v.kind == "boxa4":
                 try:
                     raw = await self.rpc.call(v.launcher, encode(BOXA_POOL_KEY, token))
@@ -708,6 +734,14 @@ class Dex:
                 except (RpcError, IndexError, ValueError):
                     pass
         return keys
+
+    def cached_route(self, token: str) -> Route | None:
+        """The remembered route without asking the chain (sells: the pool doesn't move; a dead one fails the quote)."""
+        c = self._venue_cache.get(token.lower())
+        if not c or time.monotonic() - c[0] >= CACHE_TTL:
+            return None
+        v = next((x for x in self.venues if x.name == c[1]), None)
+        return Route(v, fee=c[2], pool=c[3], key=c[4], via=c[5]) if v else None
 
     async def route(self, token: str) -> Route:
         """Venue that gives the most tokens for PROBE HYPE. The winning venue is remembered for 30 minutes, so
@@ -719,7 +753,7 @@ class Dex:
             v = next((x for x in self.venues if x.name == c[1]), None)
             if v:
                 for r in await self._routes_at(v, token):
-                    if r.fee == c[2] and r.pool == c[3] and r.key == c[4]:
+                    if r.fee == c[2] and r.pool == c[3] and r.key == c[4] and r.via == c[5]:
                         return r
         t0 = time.monotonic()
         self.last_route_timing = {}
@@ -758,7 +792,7 @@ class Dex:
         if not routes:
             raise NoPool("пул с HYPE не найден ни на одной площадке")
         best = max(routes, key=lambda r: r.probe_out)
-        self._venue_cache[token.lower()] = (time.monotonic(), best.venue.name, best.fee, best.pool, best.key)
+        self._venue_cache[token.lower()] = (time.monotonic(), best.venue.name, best.fee, best.pool, best.key, best.via)
         return best
 
     async def value(self, token: str, amount: int) -> int:
@@ -800,26 +834,83 @@ class Dex:
             to, data = v.router, encode(SWAP_ETH_FOR_TOKENS, min_out, [v.whype, token], acct.address, deadline)
         rc = await s.send(acct, to, data, value=hype_in, on_sent=on_sent)
         got = await self.balance_of(token, acct.address) - before
+        self.approve_later(s, acct, token, r)
         return rc, max(got, 0), v
 
-    async def sell(self, s: Sender, acct, token: str, amount: int, slippage_bps: int, on_sent=None) -> tuple[dict, int, Venue]:
-        """Returns (swap receipt, HYPE paid out by the swap, venue)."""
-        r = await self.route(token)
+    async def _needs_approve(self, owner: str, token: str, r: Route, amount: int) -> bool:
         v = r.venue
-        deadline = int(time.time()) + 300
         if v.kind in ("ep4", "v4any"):  # Universal Router pulls tokens through Permit2
-            if dec_uint(await self.rpc.call(token, encode(ALLOWANCE, acct.address, PERMIT2))) < amount:
-                await s.send(acct, token, encode(APPROVE, PERMIT2, UINT_MAX))
-            p2 = await self.rpc.call(PERMIT2, encode(PERMIT2_ALLOWANCE, acct.address, token, v.router))
-            p2_amount, p2_exp = dec_uint(p2, 0), dec_uint(p2, 1)
-            if p2_amount < amount or p2_exp < time.time() + 600:
-                await s.send(acct, PERMIT2, encode(PERMIT2_APPROVE, token, v.router, 2 ** 160 - 1,
+            p2a = v.permit2 or PERMIT2
+            a, p2 = await asyncio.gather(self.rpc.call(token, encode(ALLOWANCE, owner, p2a)),
+                                         self.rpc.call(p2a, encode(PERMIT2_ALLOWANCE, owner, token, v.router)))
+            return dec_uint(a) < amount or dec_uint(p2, 0) < amount or dec_uint(p2, 1) < time.time() + 600
+        return dec_uint(await self.rpc.call(token, encode(ALLOWANCE, owner, v.router))) < amount
+
+    async def _approve(self, s: Sender, acct, token: str, r: Route, amount: int):
+        """Caller holds the sender lock. Unlimited approvals, so this runs once per wallet+token+router."""
+        v = r.venue
+        if v.kind in ("ep4", "v4any"):
+            p2a = v.permit2 or PERMIT2
+            if dec_uint(await self.rpc.call(token, encode(ALLOWANCE, acct.address, p2a))) < amount:
+                await s.send(acct, token, encode(APPROVE, p2a, UINT_MAX))
+            p2 = await self.rpc.call(p2a, encode(PERMIT2_ALLOWANCE, acct.address, token, v.router))
+            if dec_uint(p2, 0) < amount or dec_uint(p2, 1) < time.time() + 600:
+                await s.send(acct, p2a, encode(PERMIT2_APPROVE, token, v.router, 2 ** 160 - 1,
                                                    int(time.time()) + 30 * 86400))
         else:
-            allowance = dec_uint(await self.rpc.call(token, encode(ALLOWANCE, acct.address, v.router)))
-            if allowance < amount:
-                await s.send(acct, token, encode(APPROVE, v.router, UINT_MAX))
-        out = await self.quote_sell(r, token, amount, acct.address)
+            await s.send(acct, token, encode(APPROVE, v.router, UINT_MAX))
+
+    def approve_later(self, s: Sender, acct, token: str, r: Route):
+        """Right after a buy: approve the router in the background, so the first sell doesn't wait for an
+        approve tx of its own (that was a whole extra confirmation between the Sell button and the swap)."""
+        k = (acct.address.lower(), token.lower())
+        if k in self._approve_jobs and not self._approve_jobs[k].done():
+            return
+
+        async def job():
+            try:
+                if not await self._needs_approve(acct.address, token, r, 2 ** 128):
+                    return
+                async with s.lock(acct.address):
+                    if await self._needs_approve(acct.address, token, r, 2 ** 128):
+                        await self._approve(s, acct, token, r, 2 ** 128)
+            except Exception as ex:
+                log.info("pre-approve %s: %s", token[:10], ex)
+            finally:
+                self._approve_jobs.pop(k, None)
+        self._approve_jobs[k] = asyncio.get_running_loop().create_task(job())
+
+    async def sell(self, s: Sender, acct, token: str, amount: int, slippage_bps: int, on_sent=None) -> tuple[dict, int, Venue]:
+        """Returns (swap receipt, HYPE paid out by the swap, venue). Allowance, quote and balance are read at
+        once; a remembered route is used without re-checking (if its quote fails, the route is searched again)."""
+        r = self.cached_route(token)
+        fresh = r is None
+        if fresh:
+            r = await self.route(token)
+
+        async def _quote(rt):
+            try:
+                return await self.quote_sell(rt, token, amount, acct.address)
+            except (RpcError, IndexError, ValueError):
+                return 0
+        need, out, before = await asyncio.gather(self._needs_approve(acct.address, token, r, amount),
+                                                 _quote(r), self.rpc.balance(acct.address))
+        if not out and not fresh:  # the remembered pool is gone (e.g. the coin left the curve): search again
+            self._venue_cache.pop(token.lower(), None)
+            r = await self.route(token)
+            need, out = await asyncio.gather(self._needs_approve(acct.address, token, r, amount), _quote(r))
+        v = r.venue
+        if need:
+            job = self._approve_jobs.get((acct.address.lower(), token.lower()))
+            if job and not job.done():
+                log.info("sell %s: waiting for the background approve", token[:10])
+            await self._approve(s, acct, token, r, amount)
+            if v.kind == "v3" and not v.quoter:  # its quote simulates the swap, which needs the allowance
+                out = await _quote(r)
+            before = await self.rpc.balance(acct.address)  # the approve paid gas
+        if not out:
+            raise NoPool("не удалось получить котировку продажи")
+        deadline = int(time.time()) + 300
         min_out = out * (10_000 - slippage_bps) // 10_000
         if v.kind == "kleos":
             data = encode(K_SELL, token, amount, 0, min_out, acct.address, deadline)
@@ -843,7 +934,6 @@ class Dex:
             data = encode_bytes_array(MULTICALL, [swap, unwrap])
         else:
             data = encode(SWAP_TOKENS_FOR_ETH, amount, min_out, [token, v.whype], acct.address, deadline)
-        before = await self.rpc.balance(acct.address)
         rc = await s.send(acct, v.router, data, on_sent=on_sent)
         got = await self.rpc.balance(acct.address) - before + receipt_cost(rc)
         return rc, max(got, 0), v
