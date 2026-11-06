@@ -437,7 +437,8 @@ async def digest_rows() -> list[dict]:
     for token in tracker.candidates():
         last = store.q("SELECT ts, price, mc FROM prices WHERE token=? ORDER BY ts DESC LIMIT 1", (token,))
         old = store.q("SELECT ts, price FROM prices WHERE token=? AND ts>=? ORDER BY ts LIMIT 1", (token, now - 86400))
-        if not last or not old or now - last[0][0] > 1800 or last[0][0] - old[0][0] < 20 * 3600 or not old[0][1]:
+        # last price may be up to 3 h old: a slow node pass must not empty the whole digest (it was 30 min)
+        if not last or not old or now - last[0][0] > 3 * 3600 or last[0][0] - old[0][0] < 20 * 3600 or not old[0][1]:
             continue
         mc = last[0][2] or 0
         if mc < digest.MIN_MC:
@@ -479,9 +480,52 @@ async def post_digest(_ctx=None) -> bool:
 
     def link(r):
         return links.token_page(r["pad"], r["address"]) if r["pad"] else (r["url"] or f"{C.EXPLORER}/token/{r['address']}")
-    await post("daily", digest.text(up, down, link), png)
+    if not await post("daily", digest.text(up, down, link), png):
+        log.warning("digest not posted: %s", post.last_err)
+        return False
     log.info("digest posted: %d up, %d down", len(up), len(down))
     return True
+
+
+async def _tell_owner(text: str):
+    oid = owner_id()
+    if oid and APP:
+        try:
+            await APP.bot.send_message(oid, text, parse_mode=ParseMode.HTML)
+        except Exception as ex:
+            log.warning("can't DM owner: %s", ex)
+
+
+async def digest_tick(_ctx=None):
+    """Posts the daily top once a day at DIGEST_TIME or later (up to 6 h late, e.g. after a restart or while prices
+    were missing). The owner gets one DM a day if it can't be posted."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(C.env("DIGEST_TZ", "Europe/Minsk"))
+    now = dt.datetime.now(tz)
+    hh, mm = (int(x) for x in C.env("DIGEST_TIME", "18:00").split(":"))
+    due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    day = now.strftime("%Y-%m-%d")
+    if now < due or now - due > dt.timedelta(hours=6) or store.kv_get("digest_day") == day:
+        return
+    try:
+        if not store.topic("daily"):
+            ok, why = False, "the <b>daily</b> topic isn't bound — run <code>/settopic daily</code> inside the topic"
+        else:
+            post.last_err = ""   # don't report another topic's old error
+            ok = await post_digest()
+            why = (getattr(post, "last_err", "") and f"Telegram error: {post.last_err}") or \
+                "not enough fresh 24h price history (the tracker had no recent prices)"
+    except Exception as ex:
+        log.exception("digest failed")
+        ok, why = False, f"{type(ex).__name__}: {ex}"[:200]
+    if ok:
+        store.kv_set("digest_day", day)
+        return
+    if store.kv_get("digest_warned") != day:
+        store.kv_set("digest_warned", day)
+        await _tell_owner(f"⚠️ Daily top gainers wasn't posted at {hh:02d}:{mm:02d}: {why}.\n"
+                          "I'll keep retrying every 10 min for 6 hours. /digest posts it by hand.")
 
 
 async def cmd_digest(update: Update, ctx):
@@ -489,8 +533,11 @@ async def cmd_digest(update: Update, ctx):
         return
     if not store.topic("daily"):
         return await update.effective_message.reply_html("Bind a topic first: <code>/settopic daily</code> inside the topic.")
+    post.last_err = ""
     if not await post_digest():
-        await update.effective_message.reply_text("Not enough price history yet: the bot needs ~24h of prices first.")
+        await update.effective_message.reply_text(
+            f"Couldn't post: {post.last_err}" if getattr(post, "last_err", "") else
+            "Not enough fresh price history yet: the bot needs ~24h of prices first.")
 
 
 # ---------------------------------------------------------------- start / admin
@@ -703,8 +750,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     import datetime as dt
     from zoneinfo import ZoneInfo
-    hh, mm = (int(x) for x in C.env("DIGEST_TIME", "18:00").split(":"))
-    app.job_queue.run_daily(post_digest, time=dt.time(hh, mm, tzinfo=ZoneInfo(C.env("DIGEST_TZ", "Europe/Minsk"))))
+    # every 10 min instead of run_daily: a restart around DIGEST_TIME or an empty first try no longer skips the day
+    app.job_queue.run_repeating(digest_tick, interval=600, first=60)
     log.info("Elysium Analyzer starting")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
