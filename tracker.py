@@ -149,15 +149,16 @@ class Tracker:
 
     async def check(self, token: str) -> bool:
         """False if the token couldn't be quoted (the caller backs it off)."""
-        snap = await self.market.try_snap(token, retries=0)
+        row = self.store.deploy(token)
+        # the venue the token was found on before: checked alone first (a full search costs dozens of RPC calls)
+        snap = await self.market.try_snap(token, retries=0, venue=(row or {}).get("venue") or "")
         if not snap or not snap.hype_usd or snap.mc <= 0:
             return False
         now, mc = time.time(), snap.mc
-        row = self.store.deploy(token)
         prev_mc = (row or {}).get("last_mc") or 0
         if row:
-            self.store.q("UPDATE deploys SET last_mc=?, ath=MAX(ath, ?) WHERE token=?",
-                         (mc, mc if (row["ts"] or 0) > now - C.ATH_DAYS * 86400 else 0, token))
+            self.store.q("UPDATE deploys SET last_mc=?, ath=MAX(ath, ?), venue=? WHERE token=?",
+                         (mc, mc if (row["ts"] or 0) > now - C.ATH_DAYS * 86400 else 0, snap.route.venue.name, token))
             row["ath"] = max(row["ath"] or 0, mc)
         calls.update_mcap(self.store.db, token, mc)
         if self.ext:

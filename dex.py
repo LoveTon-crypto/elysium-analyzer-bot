@@ -743,7 +743,7 @@ class Dex:
         v = next((x for x in self.venues if x.name == c[1]), None)
         return Route(v, fee=c[2], pool=c[3], key=c[4], via=c[5]) if v else None
 
-    async def route(self, token: str) -> Route:
+    async def route(self, token: str, prefer: str = "") -> Route:
         """Venue that gives the most tokens for PROBE HYPE. The winning venue is remembered for 30 minutes, so
         trades and refreshes re-check only that venue. A fresh search asks every venue at once but doesn't wait for
         the slowest: once a pool is found it waits ROUTE_GRACE more for a better one, and never longer than
@@ -755,6 +755,17 @@ class Dex:
                 for r in await self._routes_at(v, token):
                     if r.fee == c[2] and r.pool == c[3] and r.key == c[4] and r.via == c[5]:
                         return r
+        # a venue known from before (an expired cache entry, or the caller's record of it, e.g. the analyzer's
+        # deploys table): ask only that one. Searching all ~25 venues takes dozens of RPC calls per token — with a
+        # few hundred tokens after a restart every check timed out.
+        known = prefer or (c[1] if c else "")
+        v = next((x for x in self.venues if x.name == known), None) if known else None
+        if v:
+            got = await self._routes_at(v, token)
+            if got:
+                best = max(got, key=lambda r: r.probe_out)
+                self._venue_cache[token.lower()] = (time.monotonic(), v.name, best.fee, best.pool, best.key, best.via)
+                return best
         t0 = time.monotonic()
         self.last_route_timing = {}
 

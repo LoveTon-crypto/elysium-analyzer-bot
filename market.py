@@ -139,20 +139,20 @@ class Market:
     async def hype_usd(self) -> float:
         return await fetch_hype_usd(self.rpc.http)
 
-    async def snap(self, token: str) -> Snap:
+    async def snap(self, token: str, venue: str = "") -> Snap:
         """Raises NoPool if the address isn't a token or has no HYPE pool."""
         tok, hu = await asyncio.gather(self.dex.token(token), self.hype_usd())
-        route = await self.dex.route(token)
+        route = await self.dex.route(token, prefer=venue)
         price = route.price(tok.decimals)
         supply = tok.supply / 10 ** tok.decimals if tok.decimals is not None else 0
         liq = (route.liquidity or 0) / 1e18
         return Snap(tok, route, price, price * supply, liq, hu, links.pad_of_route(route))
 
-    async def try_snap(self, token: str, retries: int = 1) -> Snap | None:
+    async def try_snap(self, token: str, retries: int = 1, venue: str = "") -> Snap | None:
         """None if no pool answers. A busy public node can make one venue's quote fail, so 'no pool' is retried."""
         for i in range(retries + 1):
             try:
-                return await self.snap(token)
+                return await self.snap(token, venue)
             except (NoPool, RpcError, IndexError, ValueError) as ex:
                 if i == retries:
                     log.info("no pool %s: %s", token, ex)
