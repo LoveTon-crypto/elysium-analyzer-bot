@@ -597,6 +597,9 @@ async def cmd_deploys(update: Update, ctx):
              f"{ago(big.stats['last']) + ' ago' if big.stats['last'] else '—'}",
              f"Tracker: {tracker.last_count} tokens, this pass {tracker.done}/{tracker.last_count} (backed off {tracker.last_skipped}), last full pass "
              f"{ago(tracker.last_tick) + ' ago' if tracker.last_tick else '—'}"]
+    r = tracker.last_res
+    if r:
+        lines.append(f"Last pass: ok {r['ok']} · no pool {r['nopool']} · timeout {r['timeout']} · err {r['err']}")
     u = usd_status()
     lines.append(f"HYPE/USD: {u['v']:.3f} via {u['src'] or '—'}" +
                  (f" · ⚠️ {u['fails']} failed rounds: <code>{e(u['err'][:300])}</code>" if u["fails"] else ""))

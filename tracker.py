@@ -32,6 +32,7 @@ class Tracker:
         self.skip: dict[str, tuple[int, float]] = {}   # token → (misses in a row, don't re-check before ts)
         self.last_skipped = 0
         self.no_price = False
+        self.last_res: dict = {}
         self.hot: dict[str, float] = {}    # token → ts of its last big buy: watched for HOT_HOURS, never backed off long
 
     def candidates(self) -> list[str]:
@@ -107,29 +108,41 @@ class Tracker:
         tokens = [t for t in all_tokens if self.skip.get(t, (0, 0))[1] <= now]
         self.last_skipped = len(all_tokens) - len(tokens)
         sem = asyncio.Semaphore(int(C.env("TRACK_CONCURRENCY", "16")))
-        limit = float(C.env("TRACK_TIMEOUT", "8"))
+        limit = float(C.env("TRACK_TIMEOUT", "12"))
         self.last_count, self.done = len(tokens), 0
 
         young_since = now - 7200
         young = {r[0] for r in self.store.q("SELECT token FROM deploys WHERE ts>?", (young_since,))}
 
+        alive = {r[0] for r in self.store.q("SELECT token FROM deploys WHERE last_mc>=?", (C.TRACK_MIN_MC,))}
+        res = {"ok": 0, "nopool": 0, "timeout": 0, "err": 0}
+
         async def one(tok):
             async with sem:
-                ok = False
+                ok, why = False, "nopool"
                 fresh = tok in young or tok in self.hot     # a slow quote on a live launch isn't a dead token
                 try:
                     ok = await asyncio.wait_for(self.check(tok), limit * 2 if fresh else limit)
+                except asyncio.TimeoutError:
+                    why = "timeout"
                 except Exception as ex:
+                    why = "err"
                     log.debug("check %s: %s", tok, ex)
+                res["ok" if ok else why] += 1
                 if ok:
                     self.skip.pop(tok, None)
                 else:
+                    # Only "no pool" means dead. A slow node (timeout) used to back live tokens off for up to 30 min
+                    # too — and their MC/dip alerts never came. Slow or once-alive tokens: retried within 2 min.
                     n = self.skip.get(tok, (0, 0))[0] + 1
-                    self.skip[tok] = (n, time.time() + (0 if fresh else min(60 * 2 ** (n - 1), 1800)))
+                    cap = 120 if why != "nopool" or tok in alive else 1800
+                    self.skip[tok] = (n, time.time() + (0 if fresh else min(60 * 2 ** (n - 1), cap)))
                 self.done += 1
         await asyncio.gather(*(one(t) for t in tokens))
         self.last_tick = time.time()
-        log.info("tracker pass: %d checked, %d backed off, %.0fs", len(tokens), self.last_skipped, time.time() - now)
+        self.last_res = res
+        log.info("tracker pass: %d checked (ok %d, no pool %d, timeout %d, err %d), %d backed off, %.0fs",
+                 len(tokens), res["ok"], res["nopool"], res["timeout"], res["err"], self.last_skipped, time.time() - now)
 
     async def check(self, token: str) -> bool:
         """False if the token couldn't be quoted (the caller backs it off)."""

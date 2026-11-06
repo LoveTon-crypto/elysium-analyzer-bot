@@ -425,7 +425,7 @@ def test_hype_usd_fallback(tmp_path, monkeypatch):
     """Hyperliquid down → next source; all down → last good price kept, not 0."""
     import market as M
     monkeypatch.setattr(M, "_PRICE_FILE", str(tmp_path / "p"))
-    monkeypatch.setattr(M, "_USD", {"v": 0.0, "at": 0.0, "tried": 0.0, "src": "", "fails": 0, "err": ""})
+    monkeypatch.setattr(M, "_USD", {"v": 0.0, "at": -1e9, "tried": -1e9, "src": "", "fails": 0, "err": ""})
 
     class Resp:
         def __init__(self, j): self.j = j
@@ -444,5 +444,5 @@ def test_hype_usd_fallback(tmp_path, monkeypatch):
     h = Http()
     assert asyncio.run(M.fetch_hype_usd(h)) == 41.5 and M._USD["src"] == "coingecko"
     h.down = {"hl", "all"}
-    M._USD["at"] = 0.0; M._USD["tried"] = 0.0
+    M._USD["at"] = -1e9; M._USD["tried"] = -1e9
     assert asyncio.run(M.fetch_hype_usd(h)) == 41.5 and M._USD["fails"] == 1

@@ -43,12 +43,12 @@ class Snap:
 # tracker backed off every token (no MC/dip alerts for hours). The last good price is kept (and saved to disk),
 # a stale price is far better than none.
 _PRICE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".hype_usd")
-_USD = {"v": 0.0, "at": 0.0, "tried": 0.0, "src": "", "fails": 0, "err": ""}
+_USD = {"v": 0.0, "at": -1e9, "tried": -1e9, "src": "", "fails": 0, "err": ""}
 _USD_LOCK: asyncio.Lock | None = None
 
 try:
     with open(_PRICE_FILE) as _f:
-        _USD["v"], _USD["at"] = float(_f.read().split()[0]), 1.0   # known but "old": refreshed at once
+        _USD["v"], _USD["at"] = float(_f.read().split()[0]), -1e9  # known but "old": refreshed at once
 except Exception:
     pass
 
